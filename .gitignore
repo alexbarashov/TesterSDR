@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# Логи / временные
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Наши большие данные SDR / захваты
+captures/
+*.iq
+*.cf32
+*.f32
+*.bin
+*.wav
+*.raw
+*.dat
+*.zip
+
+# Артефакты графиков/кешей
+*.png
+*.svg
+*.pdf
+.cache/
