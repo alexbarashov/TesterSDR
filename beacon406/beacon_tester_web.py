@@ -170,13 +170,21 @@ def process_cf32_file(file_path):
             else:
                 ph_fall = 0.0
 
+            # Вычисляем t_mod для дальнейших расчетов
+            t_mod = float(phase_res.get("Tmod", 0.0)) if phase_res.get("Tmod") is not None else 0.0
+
+            # Вычисляем BitRate: FSd / Tmod как в beacon406-plot.py
+            FSd = sample_rate / 4.0  # 250000.0
+            bitrate_bps = FSd / t_mod if t_mod > 0 else 0.0
+
             result.update({
                 "pos_phase": pos_phase,
                 "neg_phase": neg_phase,
                 "ph_rise": ph_rise,
                 "ph_fall": ph_fall,
                 "asymmetry": float(phase_res.get("Ass", 0.0)) if phase_res.get("Ass") is not None else 0.0,
-                "t_mod": float(phase_res.get("Tmod", 0.0)) if phase_res.get("Tmod") is not None else 0.0
+                "t_mod": t_mod,
+                "bitrate_bps": bitrate_bps
             })
 
         # Дополнительные метрики из pulse_result
@@ -184,6 +192,34 @@ def process_cf32_file(file_path):
             result["rms_dbm"] = float(pulse_result["rms_dbm"]) if pulse_result["rms_dbm"] is not None else 0.0
         if "freq_hz" in pulse_result:
             result["freq_hz"] = float(pulse_result["freq_hz"]) if pulse_result["freq_hz"] is not None else 0.0
+
+        # Дополнительные вычисления для Current таблицы
+        # Total,ms из временной оси xs_fm_ms
+        if isinstance(xs_list, list) and len(xs_list) > 1:
+            total_ms = float(xs_list[-1] - xs_list[0])
+        else:
+            total_ms = 0.0
+
+        # Prise,ms из ph_rise (мкс -> мс)
+        prise_ms = ph_rise / 1000.0 if ph_rise > 0 else 0.0
+
+        # Preamble,ms из carrier_ms = edges[0] / FSd * 1e3 как в beacon406-plot.py
+        FSd = sample_rate / 4.0  # 250000.0
+        if edges_list and len(edges_list) > 0:
+            preamble_ms = float(edges_list[0] / FSd * 1e3)
+        else:
+            preamble_ms = float(baseline_ms)  # fallback
+
+        # Symmetry,% из asymmetry (дублируем для symmetry_pct)
+        symmetry_pct = float(phase_res.get("Ass", 0.0)) if phase_res.get("Ass") is not None else 0.0
+
+        # Добавляем в результат
+        result.update({
+            "total_ms": total_ms,
+            "prise_ms": prise_ms,
+            "preamble_ms": preamble_ms,
+            "symmetry_pct": symmetry_pct
+        })
 
         return result
 
@@ -525,7 +561,15 @@ HTML_PAGE = """
                 <div class="section-content">
                     <div class="control-row">
                         <span>Time scale</span>
-                        <input type="number" class="control-input" value="2" min="1" max="8">
+                        <select class="control-input" id="timeScale" onchange="onTimeScaleChange()" style="width: 60px;">
+                            <option value="1">1%</option>
+                            <option value="2">2%</option>
+                            <option value="5">5%</option>
+                            <option value="10" selected>10%</option>
+                            <option value="20">20%</option>
+                            <option value="50">50%</option>
+                            <option value="100">100%</option>
+                        </select>
                     </div>
                     <div class="control-row">
                         <span>Update</span>
@@ -619,6 +663,9 @@ HTML_PAGE = """
         const canvas = document.getElementById('phaseChart');
         const ctx = canvas.getContext('2d');
         let currentView = 'phase';
+        let currentTimeScale = 10; // Текущий масштаб времени в процентах (по умолчанию 10%)
+        const MESSAGE_DURATION_MS = 440; // Длительность сообщения в миллисекундах
+        const PHASE_START_OFFSET_MS = 160; // Начинаем отображение графика с 160мс
 
         function resizeCanvas() {
             canvas.width = canvas.clientWidth;
@@ -697,9 +744,24 @@ HTML_PAGE = """
             fetchData();
         }
 
+        function onTimeScaleChange() {
+            const timeScaleSelect = document.getElementById('timeScale');
+            currentTimeScale = parseInt(timeScaleSelect.value);
+            console.log('Time scale changed to:', currentTimeScale + '%');
+
+            // Перерисовываем график с новым масштабом если данные загружены
+            if (currentView === 'phase') {
+                fetchData(); // Обновляем отображение с новым масштабом
+            }
+        }
+
+        
         function drawChart(data) {
             console.log('DEBUG: drawChart called with currentView:', currentView);
+            console.log('DEBUG: data object:', data);
             console.log('DEBUG: data.hex_message:', data ? data.hex_message : 'no data');
+            console.log('DEBUG: data.phase_data type/length:', data ? typeof data.phase_data + '/' + (data.phase_data ? data.phase_data.length : 'null') : 'no data');
+            console.log('DEBUG: data.xs_fm_ms type/length:', data ? typeof data.xs_fm_ms + '/' + (data.xs_fm_ms ? data.xs_fm_ms.length : 'null') : 'no data');
             if (currentView === 'ph_rise_fall') {
                 console.log('DEBUG: Drawing ph_rise_fall chart');
                 drawRiseFallChart(data);
@@ -723,7 +785,6 @@ HTML_PAGE = """
                 // Для других режимов просто очищаем canvas
                 const width = canvas.width;
                 const height = canvas.height;
-                const ctx = canvas.getContext('2d');
                 ctx.clearRect(0, 0, width, height);
 
                 // Показываем заглушку
@@ -764,8 +825,9 @@ HTML_PAGE = """
                 ctx.lineTo(x, height);
                 ctx.stroke();
 
-                // Временные метки
-                const timeMs = (1.01 + i * 1.01).toFixed(2);
+                // Временные метки с учетом смещения 160мс и масштаба
+                const scaledDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100);
+                const timeMs = (PHASE_START_OFFSET_MS + i * scaledDuration / 8).toFixed(1);
                 ctx.fillText(timeMs, x - 10, height - 5);
             }
 
@@ -777,59 +839,177 @@ HTML_PAGE = """
             ctx.lineTo(width, height / 2);
             ctx.stroke();
 
-            // Y-axis labels
+            // Y-axis labels (будут обновлены после определения масштаба)
             ctx.fillStyle = '#6c757d';
-            ctx.font = '12px Arial';  // увеличен с 10px
-            ctx.fillText('+1 rad', 5, 15);
-            ctx.fillText('0', 5, height / 2 + 4);
-            ctx.fillText('-1 rad', 5, height - 10);
+            ctx.font = '12px Arial';
 
             // График данных
             if (data) {
-                const phaseData = data.phase_data || data;
-                const xsData = data.xs_fm_ms;
+                let phaseData = (data.phase_data || []).map(v => Number(v));
+                let xsData = (data.xs_fm_ms || []).map(v => Number(v));
 
-                console.log('DEBUG drawChart: phaseData length =', phaseData ? phaseData.length : 'null');
-                console.log('DEBUG drawChart: xsData length =', xsData ? xsData.length : 'null');
+                // Нормализация времени: если максимум < 10, значит это секунды → переводим в мс
+                if (xsData.length && xsData.reduce((max, v) => Math.max(max, v), -Infinity) <= 10) {
+                    console.warn('DEBUG: xs_fm_ms appears to be in seconds — converting to ms');
+                    xsData = xsData.map(v => v * 1000);
+                }
+
+                console.log('DEBUG drawChart: phaseData length =', phaseData.length);
+                console.log('DEBUG drawChart: phaseData type check:', typeof phaseData[0], phaseData[0]);
+                console.log('DEBUG drawChart: xsData type check:', typeof xsData[0], xsData[0]);
+
+                // Проверяем типы данных и конвертируем при необходимости
+                for (let i = 0; i < Math.min(5, phaseData.length); i++) {
+                    if (typeof phaseData[i] !== 'number') {
+                        console.warn(`DEBUG: phaseData[${i}] is not a number:`, typeof phaseData[i], phaseData[i]);
+                        phaseData[i] = parseFloat(phaseData[i]) || 0;
+                    }
+                    if (typeof xsData[i] !== 'number') {
+                        console.warn(`DEBUG: xsData[${i}] is not a number:`, typeof xsData[i], xsData[i]);
+                        xsData[i] = parseFloat(xsData[i]) || 0;
+                    }
+                }
+                console.log('DEBUG drawChart: xsData length =', xsData.length);
+                if (phaseData.length > 0) {
+                    console.log('DEBUG drawChart: phaseData sample =', phaseData.slice(0, 5));
+                }
+                if (xsData.length > 0) {
+                    console.log('DEBUG: xsData sample =', xsData.slice(0, 5));
+                }
+
+                console.log('DEBUG: Checking if can draw graph:', phaseData ? `phaseData.length=${phaseData.length}` : 'phaseData is null/undefined');
 
                 if (phaseData && phaseData.length > 1) {
-                    ctx.strokeStyle = '#1f5b99';
+                    console.log('DEBUG: Starting to draw REAL phase graph with', phaseData.length, 'points');
+
+                    // Автоматическое определение масштаба фазы
+                    const phaseMin = phaseData.reduce((min, v) => Math.min(min, v), Infinity);
+                    const phaseMax = phaseData.reduce((max, v) => Math.max(max, v), -Infinity);
+                    const phaseRange = Math.max(Math.abs(phaseMin), Math.abs(phaseMax));
+                    const phaseScale = phaseRange > 0 ? phaseRange : 0.001;
+
+                    console.log(`DEBUG: Phase range: min=${phaseMin.toFixed(6)}, max=${phaseMax.toFixed(6)}, scale=${phaseScale.toFixed(6)}`);
+
+                    // Обновляем Y-axis метки с учетом автоматического масштаба
+                    ctx.fillStyle = '#6c757d';
+                    ctx.font = '12px Arial';
+                    ctx.fillText(`+${phaseScale.toFixed(3)} rad`, 5, 15);
+                    ctx.fillText('0', 5, height / 2 + 4);
+                    ctx.fillText(`-${phaseScale.toFixed(3)} rad`, 5, height - 10);
+
+                    ctx.strokeStyle = '#FF0000'; // Красный для реального графика фазы
                     ctx.lineWidth = 2;
                     ctx.beginPath();
 
-                    // Если есть временная шкала
-                    if (xsData && xsData.length === phaseData.length) {
-                        const xMin = Math.min(...xsData);
-                        const xMax = Math.max(...xsData);
-                        const xRange = xMax - xMin || 1;
+                    // Правильная логика на основе времени
+                    console.log('DEBUG: Drawing time-based graph');
 
-                        for (let i = 0; i < phaseData.length; i++) {
-                            const x = ((xsData[i] - xMin) / xRange) * width;
-                            const y = height / 2 - (phaseData[i] / 1.5) * (height / 2); // Масштабирование по ±1.5 рад
-
+                    // Проверяем наличие временных данных
+                    if (!xsData || xsData.length === 0 || xsData.length !== phaseData.length) {
+                        console.warn('DEBUG: Missing or mismatched time data (xsData), falling back to index-based drawing');
+                        const pointsToShow = Math.min(100, phaseData.length);
+                        let minY = Infinity, maxY = -Infinity;
+                        for (let i = 0; i < pointsToShow; i++) {
+                            const x = (i / pointsToShow) * width;
+                            const y = height / 2 - (phaseData[i] / phaseScale) * (height / 2);
+                            minY = Math.min(minY, y);
+                            maxY = Math.max(maxY, y);
                             if (i === 0) {
                                 ctx.moveTo(x, y);
                             } else {
                                 ctx.lineTo(x, y);
                             }
                         }
-                    } else {
-                        // Если нет временной шкалы, используем равномерное распределение
-                        for (let i = 0; i < phaseData.length; i++) {
-                            const x = (width / (phaseData.length - 1)) * i;
-                            const y = height / 2 - (phaseData[i] / 1.5) * (height / 2);
+                        console.log(`DEBUG fallback: Drew ${pointsToShow} points`);
+                        ctx.stroke();
+                        return;
+                    }
 
-                            if (i === 0) {
-                                ctx.moveTo(x, y);
-                            } else {
-                                ctx.lineTo(x, y);
-                            }
+                    // Временное окно для отображения
+                    const windowStart = PHASE_START_OFFSET_MS; // 160.0 мс
+                    const windowDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100.0); // 440 * scale/100
+                    const windowEnd = windowStart + windowDuration;
+
+                    console.log(`DEBUG time window: start=${windowStart}ms, duration=${windowDuration}ms, end=${windowEnd}ms, scale=${currentTimeScale}%`);
+
+                    // Фильтруем точки по временному окну
+                    const filteredPoints = [];
+                    for (let i = 0; i < phaseData.length; i++) {
+                        const timeMs = xsData[i];
+                        if (Number.isFinite(timeMs) && timeMs >= windowStart && timeMs <= windowEnd) {
+                            filteredPoints.push({
+                                time: timeMs,
+                                phase: phaseData[i],
+                                index: i
+                            });
                         }
                     }
+
+                    console.log(`DEBUG: Filtered ${filteredPoints.length} points from ${phaseData.length} total points in time range [${windowStart}, ${windowEnd}]ms`);
+
+                    if (filteredPoints.length === 0) {
+                        console.warn('DEBUG: No points found in specified time window - falling back to index-based drawing');
+                        const pointsToShow = Math.min(100, phaseData.length);
+                        let minY = Infinity, maxY = -Infinity;
+                        for (let i = 0; i < pointsToShow; i++) {
+                            const x = (i / pointsToShow) * width;
+                            const y = height / 2 - (phaseData[i] / phaseScale) * (height / 2);
+                            minY = Math.min(minY, y);
+                            maxY = Math.max(maxY, y);
+                            if (i === 0) {
+                                ctx.moveTo(x, y);
+                            } else {
+                                ctx.lineTo(x, y);
+                            }
+                        }
+                        ctx.stroke();
+                        console.log(`DEBUG fallback: Drew ${pointsToShow} points`);
+                        return;
+                    }
+
+                    // Даунсэмплинг до ~1000 точек для производительности (основное исправление)
+                    const targetPoints = 1000; // Настраиваемое значение; достаточно для плавного графика при любом размере холста
+                    const step = Math.max(1, Math.ceil(filteredPoints.length / targetPoints));
+                    console.log(`DEBUG: Downsampling with step=${step} (target ~${targetPoints} points, actual ~${Math.floor(filteredPoints.length / step)})`);
+
+                    let minY = Infinity, maxY = -Infinity;
+                    let firstPoint = true;
+
+                    for (let j = 0; j < filteredPoints.length; j += step) {
+                        const point = filteredPoints[j];
+
+                        // Преобразуем время в пиксели
+                        const normalizedTime = (point.time - windowStart) / windowDuration;
+                        const x = normalizedTime * width;
+                        const y = height / 2 - (point.phase / phaseScale) * (height / 2);
+
+                        minY = Math.min(minY, y);
+                        maxY = Math.max(maxY, y);
+
+                        if (firstPoint) {
+                            ctx.moveTo(x, y);
+                            console.log(`DEBUG line start: x=${x.toFixed(1)}, y=${y.toFixed(1)}, time=${point.time.toFixed(1)}ms, value=${point.phase.toFixed(8)}`);
+                            firstPoint = false;
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+
+                        // Логируем первые 5 точек
+                        if (j / step < 5) {
+                            console.log(`DEBUG line point ${j / step}: x=${x.toFixed(1)}, y=${y.toFixed(1)}, time=${point.time.toFixed(1)}ms, value=${point.phase.toFixed(8)}, normalized_time=${normalizedTime.toFixed(4)}`);
+                        }
+                    }
+
+                    console.log(`DEBUG line coordinates: minY=${minY.toFixed(1)}, maxY=${maxY.toFixed(1)}, range=${(maxY-minY).toFixed(1)}`);
+                    console.log(`DEBUG phaseScale used: ${phaseScale.toFixed(6)}`);
                     ctx.stroke();
+                    console.log('DEBUG: Time-based phase graph drawing completed');
+                } else {
+                    console.log('DEBUG: Phase graph NOT drawn - insufficient data or condition not met');
                 }
             }
-        }
+        }       
+        
 
         function updateStats(data) {
             const statsHtml = `
@@ -852,6 +1032,10 @@ HTML_PAGE = """
         }
 
         function updateDisplay(data) {
+            console.log('=== updateDisplay called ===');
+            console.log('currentView:', currentView);
+            console.log('data.phase_data length:', data.phase_data ? data.phase_data.length : 'null');
+
             // Обновление основной информации
             document.getElementById('protocol').textContent = data.protocol;
             document.getElementById('date').textContent = data.date;
@@ -873,12 +1057,8 @@ HTML_PAGE = """
             // Обновление статистики
             updateStats(data);
 
-            // Синхронизируем состояние таймера с сервером
-            if (data.running && !isRunning) {
-                startUpdating();
-            } else if (!data.running && isRunning) {
-                stopUpdating();
-            }
+            // Автообновление отключено - синхронизация с сервером не требуется
+            console.log('Display updated, auto-update remains disabled');
 
             // Обновляем график только для обычных режимов (не специальных)
             if (currentView !== 'message' && currentView !== '121_data') {
@@ -891,10 +1071,7 @@ HTML_PAGE = """
                     console.log('DEBUG: xs_fm_ms sample:', data.xs_fm_ms.slice(0, 5));
                 }
 
-                drawChart({
-                    phase_data: data.phase_data,
-                    xs_fm_ms: data.xs_fm_ms
-                });
+                drawChart(data);
             }
         }
 
@@ -1335,9 +1512,11 @@ HTML_PAGE = """
         }
 
         async function fetchData() {
+            console.log('=== fetchData called ===');
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
+                console.log('fetchData: received data, currentView:', currentView);
 
                 // Обрабатываем специальные режимы
                 if (currentView === 'message') {
@@ -1386,25 +1565,23 @@ HTML_PAGE = """
         async function runTest() {
             const response = await fetch('/api/run', { method: 'POST' });
             const data = await response.json();
-            if (data.running) {
-                startUpdating();
-            }
+            // Автообновление отключено - обновление только при загрузке файла
+            console.log('Test run, auto-update disabled');
         }
 
         async function contTest() {
             const response = await fetch('/api/cont', { method: 'POST' });
             const data = await response.json();
-            if (data.running) {
-                startUpdating();
-            }
+            // Автообновление отключено - обновление только при загрузке файла
+            console.log('Test continue, auto-update disabled');
         }
 
         async function breakTest() {
             const response = await fetch('/api/break', { method: 'POST' });
             const data = await response.json();
-            if (!data.running) {
-                stopUpdating();
-            }
+            // Автообновление всегда отключено
+            stopUpdating();
+            console.log('Test break, auto-update disabled');
         }
 
         function loadFile() {
@@ -1432,13 +1609,18 @@ HTML_PAGE = """
 
                     const result = await response.json();
 
-                    if (result.status === 'success') {
-                        console.log('File uploaded successfully:', result);
+                    if (result.status === 'success' && result.processed) {
+                        console.log('File uploaded and processed successfully:', result);
+                        console.log('=== FORCING DATA UPDATE ===');
                         // Обновляем данные после загрузки
                         fetchData();
                     } else {
                         console.error('Upload failed:', result);
-                        alert('Ошибка загрузки файла: ' + (result.error || 'Unknown error'));
+                        if (result.status === 'success' && !result.processed) {
+                            alert('Файл загружен, но не удалось обработать: ' + (result.message || 'Unknown error'));
+                        } else {
+                            alert('Ошибка загрузки файла: ' + (result.error || result.message || 'Unknown error'));
+                        }
                     }
                 } catch (error) {
                     console.error('Upload error:', error);
@@ -1454,8 +1636,11 @@ HTML_PAGE = """
             await fetch('/api/save', { method: 'POST' });
         }
 
-        // Первоначальная загрузка данных (но без автоматического обновления)
+        // Первоначальная загрузка данных (автообновление отключено по умолчанию)
         fetchData();
+
+        // Отключаем автообновление по умолчанию - график обновляется только при загрузке файла
+        console.log('Auto-update disabled by default');
     </script>
 </body>
 </html>
@@ -1466,10 +1651,11 @@ HTML_PAGE = """
 def index():
     response = Response(HTML_PAGE, mimetype='text/html')
     # Отключаем кэширование для разработки
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
     response.headers['Last-Modified'] = 'Thu, 01 Jan 1970 00:00:00 GMT'
+    response.headers['ETag'] = ''
     return response
 
 @app.route('/api/status')
@@ -1480,8 +1666,13 @@ def api_status():
     fs3_var = STATE.fs3_hz + random.uniform(-0.5, 0.5)
 
     print(f"API STATUS DEBUG: phase_data length = {len(STATE.phase_data)}")
+    print(f"API STATUS DEBUG: xs_fm_ms length = {len(STATE.xs_fm_ms)}")
     print(f"API STATUS DEBUG: pos_phase = {STATE.pos_phase}")
     print(f"API STATUS DEBUG: neg_phase = {STATE.neg_phase}")
+    if len(STATE.phase_data) > 0:
+        print(f"API STATUS DEBUG: phase_data sample = {STATE.phase_data[:5]}")
+    if len(STATE.xs_fm_ms) > 0:
+        print(f"API STATUS DEBUG: xs_fm_ms sample = {STATE.xs_fm_ms[:5]}")
 
     return jsonify({
         'running': STATE.running,
@@ -1599,6 +1790,18 @@ def api_upload():
             if "freq_hz" in processing_result:
                 STATE.freq_hz = processing_result["freq_hz"]
 
+            # Добавляем новые метрики для Current таблицы
+            if "bitrate_bps" in processing_result:
+                STATE.bitrate_bps = processing_result["bitrate_bps"]
+            if "symmetry_pct" in processing_result:
+                STATE.symmetry_pct = processing_result["symmetry_pct"]
+            if "total_ms" in processing_result:
+                STATE.total_ms = processing_result["total_ms"]
+            if "prise_ms" in processing_result:
+                STATE.prise_ms = processing_result["prise_ms"]
+            if "preamble_ms" in processing_result:
+                STATE.preamble_ms = processing_result["preamble_ms"]
+
             # Сохраняем данные фазы для графика
             STATE.phase_data = processing_result.get("phase_data", [])
             STATE.xs_fm_ms = processing_result.get("xs_fm_ms", [])
@@ -1611,14 +1814,26 @@ def api_upload():
             STATE.message = f"Error processing {filename}: {error_msg}"
             print(f"Processing error: {error_msg}")
 
-        return jsonify({
-            'status': 'success',
-            'filename': filename,
-            'size': os.path.getsize(file_path),
-            'path': file_path,
-            'processed': processing_result.get("success", False),
-            'message': STATE.message
-        })
+        # Возвращаем правильный статус в зависимости от результата обработки
+        if processing_result.get("success"):
+            return jsonify({
+                'status': 'success',
+                'filename': filename,
+                'size': os.path.getsize(file_path),
+                'path': file_path,
+                'processed': True,
+                'message': STATE.message
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'error': processing_result.get("error", "Processing failed"),
+                'filename': filename,
+                'size': os.path.getsize(file_path),
+                'path': file_path,
+                'processed': False,
+                'message': STATE.message
+            }), 400
 
     except Exception as e:
         print(f"Upload error: {e}")
