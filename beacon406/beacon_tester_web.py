@@ -530,6 +530,140 @@ HTML_PAGE = """
             font-family: 'Courier New', monospace;
             font-size: 13px;  /* добавлен размер шрифта */
         }
+
+        /* Стили для HTML таблицы Message */
+        .message-table-container {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+            padding: 0;
+            position: relative;
+            height: 494px;
+            margin-bottom: 8px;
+            overflow-y: auto;
+        }
+
+        .message-table-header {
+            background: #1976D2;
+            color: white;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .message-table-header h3 {
+            margin: 0;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .message-table-header .hex-info {
+            margin: 4px 0 0 0;
+            font-size: 11px;
+        }
+
+        .message-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .message-table th {
+            background: #E0E0E0;
+            color: #333;
+            font-weight: bold;
+            font-size: 13px;
+            padding: 8px 5px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .message-table td {
+            padding: 6px 5px;
+            border-bottom: 0.5px solid #DDD;
+            color: #333;
+            font-size: 12px;
+        }
+
+        .message-table tr:nth-child(even) {
+            background: #F5F5F5;
+        }
+
+        .message-table tr:nth-child(odd) {
+            background: white;
+        }
+
+        .message-table .binary-content {
+            font-family: monospace;
+            font-size: 11px;
+            color: #0066CC;
+        }
+
+        .message-table .field-name {
+            font-weight: bold;
+        }
+
+        .message-table-footer {
+            padding: 8px 12px;
+            font-size: 11px;
+            color: #666;
+            background: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+        }
+
+        /* Стили для HTML таблицы 121 Data */
+        .data121-table-container {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+            padding: 0;
+            position: relative;
+            height: 494px;
+            margin-bottom: 8px;
+            overflow-y: auto;
+        }
+
+        .data121-table-header {
+            background: #5a9bd4;
+            color: white;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .data121-table-header h3 {
+            margin: 0;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .data121-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .data121-table td {
+            padding: 8px 10px;
+            border: 1px solid #999;
+            color: #333;
+            font-size: 12px;
+            width: 25%;
+        }
+
+        .data121-table .param-name {
+            font-weight: bold;
+        }
+
+        .data121-table .param-value {
+            font-weight: normal;
+        }
+
+        .data121-table-footer {
+            padding: 8px 20px;
+            font-size: 11px;
+            color: #666;
+            background: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+        }
     </style>
 </head>
 <body>
@@ -660,8 +794,8 @@ HTML_PAGE = """
 
     <script>
         console.log('=== BEACON TESTER v2.1 LOADED ===');
-        const canvas = document.getElementById('phaseChart');
-        const ctx = canvas.getContext('2d');
+        let canvas = document.getElementById('phaseChart');
+        let ctx = canvas.getContext('2d');
         let currentView = 'phase';
         let currentTimeScale = 10; // Текущий масштаб времени в процентах (по умолчанию 10%)
         const MESSAGE_DURATION_MS = 440; // Длительность сообщения в миллисекундах
@@ -680,9 +814,17 @@ HTML_PAGE = """
             currentView = viewType;
             console.log('=== DEBUG: currentView set to:', currentView);
 
+            // Восстанавливаем canvas если он был заменен HTML таблицей
+            const chartContainer = document.querySelector('.chart-container');
+            if (!chartContainer.querySelector('#phaseChart')) {
+                chartContainer.innerHTML = '<canvas id="phaseChart"></canvas>';
+                // Обновляем глобальные ссылки на canvas
+                canvas = document.getElementById('phaseChart');
+                ctx = canvas.getContext('2d');
+                resizeCanvas(); // Переинициализируем размеры canvas
+            }
+
             // Очищаем canvas при переключении режимов
-            const canvas = document.getElementById('phaseChart');
-            const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             const titleEl = document.getElementById('chartTitle');
@@ -1060,6 +1202,171 @@ HTML_PAGE = """
         }       
         
 
+        function showMessageTable(hexMessage) {
+            console.log('DEBUG: showMessageTable called with:', hexMessage);
+
+            // Очищаем canvas и показываем HTML таблицу
+            const canvas = document.getElementById('phaseChart');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Создаем контейнер для HTML таблицы
+            const chartContainer = document.querySelector('.chart-container');
+
+            if (!hexMessage || hexMessage.trim() === '') {
+                chartContainer.innerHTML = `
+                    <div class="message-table-container">
+                        <div style="text-align: center; padding: 50px; color: #666;">
+                            <h3>No message decoded</h3>
+                            <p>Please load a .cf32 file using the File button</p>
+                            <p>to decode EPIRB/ELT beacon message</p>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Данные таблицы (те же что были в canvas версии)
+            const tableData = [
+                ['1-15', '111111111111111', 'Bit-sync pattern', 'Valid'],
+                ['16-24', '000101111', 'Frame-sync pattern', 'Normal Operation'],
+                ['25', '1', 'Format Flag', 'Long Format'],
+                ['26', '0', 'Protocol Flag', 'Standard/National/RLS'],
+                ['27-36', '1000000000', 'Country Code', '512 - Russia'],
+                ['37-40', '0000', 'Protocol Code', 'Avionic'],
+                ['41-64', '000000100000000000000000', 'Test Data', '0x020000'],
+                ['65-74', '0111111111', 'Latitude (PDF-1)', 'Default value'],
+                ['75-85', '01111111111', 'Longitude (PDF-1)', 'Default value'],
+                ['86-106', '110000100000101101111', 'BCH PDF-1', '0x1820B7'],
+                ['107-110', '1000', 'Fixed (1101)', 'Invalid (1000)'],
+                ['111', '0', 'Position source', 'External/Unknown'],
+                ['112', '0', '121.5 MHz Device', 'Not included'],
+                ['113-122', '1111100000', 'Latitude (PDF-2)', 'bin 1111100000'],
+                ['123-132', '1111100000', 'Longitude (PDF-2)', 'bin 1111100000'],
+                ['133-144', '111001101100', 'BCH PDF-2', '0xE6C']
+            ];
+
+            // Создаем HTML таблицу
+            let tableHtml = `
+                <div class="message-table-container">
+                    <div class="message-table-header">
+                        <h3>EPIRB/ELT Beacon Message Decoder</h3>
+                    </div>
+                    <table class="message-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 90px;">Bit Range</th>
+                                <th style="width: 200px;">Binary Content</th>
+                                <th style="width: 220px;">Field Name</th>
+                                <th>Decoded Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+
+            for (let i = 0; i < tableData.length; i++) {
+                const row = tableData[i];
+                tableHtml += `
+                    <tr>
+                        <td>${row[0]}</td>
+                        <td class="binary-content">${row[1]}</td>
+                        <td class="field-name">${row[2]}</td>
+                        <td>${row[3]}</td>
+                    </tr>
+                `;
+            }
+
+            tableHtml += `
+                        </tbody>
+                    </table>
+                    <div class="message-table-footer">
+                        <div>COSPAS-SARSAT 406 MHz Beacon Message (144 bits)</div>
+                        <div>Protocol: Long Format, Standard Location</div>
+                    </div>
+                </div>
+            `;
+
+            chartContainer.innerHTML = tableHtml;
+        }
+
+        function show121DataTable(data) {
+            console.log('DEBUG: show121DataTable called');
+
+            // Очищаем canvas и показываем HTML таблицу
+            const canvas = document.getElementById('phaseChart');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Создаем контейнер для HTML таблицы
+            const chartContainer = document.querySelector('.chart-container');
+
+            // Данные таблицы (те же что были в canvas версии)
+            const tableData = [
+                ['Carrier Frequency, Hz', '0', 'Low Sweep Frequency, Hz', '0'],
+                ['Power, mW', '0.0', 'High Sweep Frequency, Hz', '0'],
+                ['Sweep Period, sec', '0.0', 'Sweep Range, Hz', '0'],
+                ['Modulation Index, %', '0', '', '']
+            ];
+
+            // Создаем HTML таблицу
+            let tableHtml = `
+                <div class="data121-table-container">
+                    <div class="data121-table-header">
+                        <h3>121.5 MHz Transmitter Parameters</h3>
+                    </div>
+                    <table class="data121-table">
+                        <tbody>
+            `;
+
+            for (let i = 0; i < tableData.length; i++) {
+                const row = tableData[i];
+                tableHtml += '<tr>';
+                for (let j = 0; j < row.length; j++) {
+                    if (row[j]) {
+                        // Названия параметров (четные колонки) - жирный шрифт
+                        const cssClass = (j % 2 === 0) ? 'param-name' : 'param-value';
+                        tableHtml += `<td class="${cssClass}">${row[j]}</td>`;
+                    } else {
+                        tableHtml += '<td></td>';
+                    }
+                }
+                tableHtml += '</tr>';
+            }
+
+            tableHtml += `
+                        </tbody>
+                    </table>
+                    <div class="data121-table-footer">
+                        <div>Emergency Locator Transmitter (ELT) operating on 121.5 MHz</div>
+                        <div>Used for aircraft emergency location and rescue operations</div>
+                    </div>
+                </div>
+            `;
+
+            chartContainer.innerHTML = tableHtml;
+        }
+
+        function updateMessageInfo(data) {
+            // Обновляем только основную информацию без canvas
+            document.getElementById('protocol').textContent = data.protocol;
+            document.getElementById('date').textContent = data.date;
+            document.getElementById('beaconModel').textContent = data.beacon_model;
+            document.getElementById('beaconFreq').textContent = data.beacon_frequency.toFixed(1);
+
+            // Показываем HEX сообщение если есть, иначе обычное сообщение
+            if (data.hex_message && data.hex_message !== '') {
+                document.getElementById('message').textContent = `HEX: ${data.hex_message}`;
+            } else {
+                document.getElementById('message').textContent = data.message;
+            }
+
+            // Обновление фазовых значений
+            document.getElementById('phasePlus').textContent = (data.phase_pos_rad * 57.2958).toFixed(2);
+            document.getElementById('phaseMinus').textContent = (data.phase_neg_rad * 57.2958).toFixed(2);
+            document.getElementById('tRise').textContent = data.t_rise_mcs.toFixed(1);
+            document.getElementById('tFall').textContent = data.t_fall_mcs.toFixed(1);
+        }
+
         function updateStats(data) {
             const statsHtml = `
                 <div class="stat-row"><span class="stat-label">FS1,Hz</span><span class="stat-value">${data.fs1_hz.toFixed(3)}</span></div>
@@ -1080,10 +1387,18 @@ HTML_PAGE = """
             document.getElementById('statsContent').innerHTML = statsHtml;
         }
 
+
         function updateDisplay(data) {
             console.log('=== updateDisplay called ===');
             console.log('currentView:', currentView);
             console.log('data.phase_data length:', data.phase_data ? data.phase_data.length : 'null');
+
+            // Восстанавливаем canvas для обычных режимов если он был заменен HTML таблицей
+            const chartContainer = document.querySelector('.chart-container');
+            if (!chartContainer.querySelector('#phaseChart')) {
+                chartContainer.innerHTML = '<canvas id="phaseChart"></canvas>';
+                resizeCanvas(); // Переинициализируем размеры canvas
+            }
 
             // Обновление основной информации
             document.getElementById('protocol').textContent = data.protocol;
@@ -1569,13 +1884,19 @@ HTML_PAGE = """
 
                 // Обрабатываем специальные режимы
                 if (currentView === 'message') {
-                    // Для режима message рисуем таблицу декодирования
-                    console.log('DEBUG: Drawing message table for hex:', data.hex_message);
-                    drawMessageTable(data.hex_message || '');
+                    // Для режима message показываем HTML таблицу декодирования и обновляем только Current
+                    console.log('DEBUG: Showing HTML message table for hex:', data.hex_message);
+                    showMessageTable(data.hex_message || '');
+                    // Обновляем только Current таблицу, не трогая canvas
+                    updateStats(data);
+                    updateMessageInfo(data);
                 } else if (currentView === '121_data') {
-                    // Для режима 121 рисуем таблицу 121
-                    console.log('DEBUG: Drawing 121 table');
-                    draw121DataTable(data);
+                    // Для режима 121 показываем HTML таблицу 121 и обновляем только Current
+                    console.log('DEBUG: Showing HTML 121 table');
+                    show121DataTable(data);
+                    // Обновляем только Current таблицу, не трогая canvas
+                    updateStats(data);
+                    updateMessageInfo(data);
                 } else {
                     // Для остальных режимов рисуем графики и обновляем display
                     updateDisplay(data);
