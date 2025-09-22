@@ -552,7 +552,7 @@ HTML_PAGE = """
 
         .message-table-header h3 {
             margin: 0;
-            font-size: 14px;
+            font-size: 16px;
             font-weight: bold;
         }
 
@@ -564,14 +564,14 @@ HTML_PAGE = """
         .message-table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 12px;
+            font-size: 14px;
         }
 
         .message-table th {
             background: #E0E0E0;
             color: #333;
             font-weight: bold;
-            font-size: 13px;
+            font-size: 15px;
             padding: 8px 5px;
             text-align: left;
             border-bottom: 1px solid #ddd;
@@ -581,7 +581,7 @@ HTML_PAGE = """
             padding: 6px 5px;
             border-bottom: 0.5px solid #DDD;
             color: #333;
-            font-size: 12px;
+            font-size: 14px;
         }
 
         .message-table tr:nth-child(even) {
@@ -594,7 +594,7 @@ HTML_PAGE = """
 
         .message-table .binary-content {
             font-family: monospace;
-            font-size: 11px;
+            font-size: 13px;
             color: #0066CC;
         }
 
@@ -631,22 +631,26 @@ HTML_PAGE = """
 
         .data121-table-header h3 {
             margin: 0;
-            font-size: 14px;
+            font-size: 16px;
             font-weight: bold;
         }
 
         .data121-table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 12px;
+            font-size: 14px;
         }
 
         .data121-table td {
             padding: 8px 10px;
             border: 1px solid #999;
             color: #333;
-            font-size: 12px;
-            width: 25%;
+            font-size: 14px;
+        }
+
+        .data121-table .param-name {
+            width: 1%;
+            white-space: nowrap;
         }
 
         .data121-table .param-name {
@@ -663,6 +667,99 @@ HTML_PAGE = """
             color: #666;
             background: #f8f9fa;
             border-top: 1px solid #dee2e6;
+        }
+
+        /* Стили для HTML таблицы Sum Table */
+        .sum-table-container {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+            padding: 0;
+            position: relative;
+            height: 494px;
+            margin-bottom: 8px;
+            overflow-y: auto;
+        }
+
+        .sum-params-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .sum-params-table .header-406 {
+            background: #5a9bd4;
+            color: white;
+            text-align: center;
+            font-weight: bold;
+            padding: 8px;
+            font-size: 16px;
+        }
+
+        .sum-params-table .header-121 {
+            background: #5a9bd4;
+            color: white;
+            text-align: center;
+            font-weight: bold;
+            padding: 8px;
+            font-size: 16px;
+        }
+
+        .sum-params-table .subheader {
+            background: #87CEEB;
+            color: white;
+            text-align: center;
+            padding: 6px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .sum-params-table .subheader-empty {
+            background: #87CEEB;
+            color: white;
+            text-align: center;
+            padding: 6px;
+            font-size: 14px;
+            font-weight: bold;
+            width: 1%;
+        }
+
+        .sum-params-table .param-row {
+            background: white;
+        }
+
+        .sum-params-table .param-row:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        .sum-params-table td {
+            padding: 6px 5px;
+            border: 1px solid #ccc;
+            font-size: 14px;
+            text-align: center;
+        }
+
+        .sum-params-table .param-name {
+            text-align: right;
+            font-weight: bold;
+            background: #f0f0f0;
+            width: 1%;
+            white-space: nowrap;
+        }
+
+        .sum-message-section {
+            margin-top: 10px;
+            border-top: 2px solid #5a9bd4;
+        }
+
+        .sum-message-header {
+            background: #5a9bd4;
+            color: white;
+            text-align: center;
+            padding: 8px;
+            font-size: 16px;
+            font-weight: bold;
         }
     </style>
 </head>
@@ -1289,6 +1386,168 @@ HTML_PAGE = """
             chartContainer.innerHTML = tableHtml;
         }
 
+        function showSumTable(data) {
+            console.log('DEBUG: showSumTable called');
+
+            // Очищаем canvas и показываем HTML таблицу
+            const canvas = document.getElementById('phaseChart');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Создаем контейнер для HTML таблицы
+            const chartContainer = document.querySelector('.chart-container');
+
+            // Данные для 406 MHz таблицы из скриншота
+            const params406 = [
+                ['Frequency, kHz', '40600.000', '40600.000', '0.000', '406025.954', '0.000'],
+                ['+Phase deviation, rad', '1.00', '1.20', '0.00', '1.09', '0.00'],
+                ['-Phase deviation, rad', '-1.00', '-1.20', '0.00', '-1.11', '0.00'],
+                ['Phase time rise, mcs', '50.00', '250.00', '0.00', '111.07', '0.00'],
+                ['Phase time fall, mcs', '50.00', '250.00', '0.00', '70.36', '0.00'],
+                ['Power, Wt', '3.16', '7.94', '0.00', '0.00', '0.00'],
+                ['Power rise, ms', '0.00', '0.00', '0.00', '0.00', '0.00'],
+                ['Bit Rate, bps', '396.00', '404.00', '0.00', '400.01', '0.00'],
+                ['Asymmetry, %', '0.00', '5.00', '0.00', '0.00', '0.00'],
+                ['CW Preamble, ms', '158.40', '161.60', '0.00', '157.53', '0.00'],
+                ['Total burst duration, ms', '435.60', '520.00', '0.00', '518.76', '0.00'],
+                ['Repetition period, s', '47.50', '52.50', '0.00', '0.00', '0.00'],
+                ['Delta Rep. period, s', '4.00', '0.00', '0.00', '0.00', '0.00']
+            ];
+
+            // Данные для 121.5 MHz таблицы
+            const params121 = [
+                ['Carrier Frequency, Hz', '0'],
+                ['Power, mW', '0.0'],
+                ['Sweep Period, sec', '0.0'],
+                ['Modulation Index, %', '0']
+            ];
+
+            // Создаем HTML - единый контейнер со всеми таблицами
+            let tableHtml = `
+                <div class="sum-table-container">
+                    <table class="sum-params-table">
+                        <tr>
+                            <td colspan="6" class="header-406">406 MHz Transmitter Parameters</td>
+                        </tr>
+                        <tr>
+                            <td rowspan="2" class="subheader-empty"></td>
+                            <td colspan="2" class="subheader">Limits</td>
+                            <td rowspan="2" class="subheader" style="width: 80px;">min</td>
+                            <td rowspan="2" class="subheader" style="width: 100px;">Current</td>
+                            <td rowspan="2" class="subheader" style="width: 100px;">Measured<br/>Info</td>
+                        </tr>
+                        <tr>
+                            <td class="subheader" style="width: 80px;">min</td>
+                            <td class="subheader" style="width: 80px;">max</td>
+                        </tr>
+            `;
+
+            // Добавляем строки параметров 406 MHz
+            for (let i = 0; i < params406.length; i++) {
+                const row = params406[i];
+                tableHtml += `
+                    <tr class="param-row">
+                        <td class="param-name">${row[0]}</td>
+                        <td>${row[1]}</td>
+                        <td>${row[2]}</td>
+                        <td>${row[3]}</td>
+                        <td>${row[4]}</td>
+                        <td>${row[5]}</td>
+                    </tr>
+                `;
+            }
+
+            // Добавляем 121.5 MHz секцию
+            tableHtml += `
+                        <tr>
+                            <td colspan="6" class="header-121">121.5 MHz Transmitter Parameters</td>
+                        </tr>
+            `;
+
+            for (let i = 0; i < params121.length; i++) {
+                const row = params121[i];
+                tableHtml += `
+                    <tr class="param-row">
+                        <td class="param-name">${row[0]}</td>
+                        <td colspan="5">${row[1]}</td>
+                    </tr>
+                `;
+            }
+
+            tableHtml += `
+                    </table>
+            `;
+
+            // Добавляем нашу таблицу Message внутри того же контейнера
+            const hexMessage = data.hex_message || 'DEFAULT_HEX';
+            if (hexMessage) {
+                // Данные таблицы Message (те же что в showMessageTable)
+                const messageTableData = [
+                    ['1-15', '111111111111111', 'Bit-sync pattern', 'Valid'],
+                    ['16-24', '000101111', 'Frame-sync pattern', 'Normal Operation'],
+                    ['25', '1', 'Format Flag', 'Long Format'],
+                    ['26', '0', 'Protocol Flag', 'Standard/National/RLS'],
+                    ['27-36', '1000000000', 'Country Code', '512 - Russia'],
+                    ['37-40', '0000', 'Protocol Code', 'Avionic'],
+                    ['41-64', '000000100000000000000000', 'Test Data', '0x020000'],
+                    ['65-74', '0111111111', 'Latitude (PDF-1)', 'Default value'],
+                    ['75-85', '01111111111', 'Longitude (PDF-1)', 'Default value'],
+                    ['86-106', '110000100000101101111', 'BCH PDF-1', '0x1820B7'],
+                    ['107-110', '1000', 'Fixed (1101)', 'Invalid (1000)'],
+                    ['111', '0', 'Position source', 'External/Unknown'],
+                    ['112', '0', '121.5 MHz Device', 'Not included'],
+                    ['113-122', '1111100000', 'Latitude (PDF-2)', 'bin 1111100000'],
+                    ['123-132', '1111100000', 'Longitude (PDF-2)', 'bin 1111100000'],
+                    ['133-144', '111001101100', 'BCH PDF-2', '0xE6C']
+                ];
+
+                // Добавляем таблицу Message в нашем стиле внутри того же контейнера
+                tableHtml += `
+                    <div style="margin-top: 10px;">
+                        <div class="message-table-header">
+                            <h3>EPIRB/ELT Beacon Message Decoder</h3>
+                        </div>
+                        <table class="message-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 90px;">Bit Range</th>
+                                    <th style="width: 200px;">Binary Content</th>
+                                    <th style="width: 220px;">Field Name</th>
+                                    <th>Decoded Value</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                for (let i = 0; i < messageTableData.length; i++) {
+                    const row = messageTableData[i];
+                    tableHtml += `
+                        <tr>
+                            <td>${row[0]}</td>
+                            <td class="binary-content">${row[1]}</td>
+                            <td class="field-name">${row[2]}</td>
+                            <td>${row[3]}</td>
+                        </tr>
+                    `;
+                }
+
+                tableHtml += `
+                            </tbody>
+                        </table>
+                        <div class="message-table-footer">
+                            <div>COSPAS-SARSAT 406 MHz Beacon Message (144 bits)</div>
+                            <div>Protocol: Long Format, Standard Location</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Закрываем единый контейнер
+            tableHtml += `</div>`;
+
+            chartContainer.innerHTML = tableHtml;
+        }
+
         function show121DataTable(data) {
             console.log('DEBUG: show121DataTable called');
 
@@ -1894,6 +2153,13 @@ HTML_PAGE = """
                     // Для режима 121 показываем HTML таблицу 121 и обновляем только Current
                     console.log('DEBUG: Showing HTML 121 table');
                     show121DataTable(data);
+                    // Обновляем только Current таблицу, не трогая canvas
+                    updateStats(data);
+                    updateMessageInfo(data);
+                } else if (currentView === 'sum_table') {
+                    // Для режима Sum table показываем HTML сводную таблицу и обновляем только Current
+                    console.log('DEBUG: Showing HTML sum table');
+                    showSumTable(data);
                     // Обновляем только Current таблицу, не трогая canvas
                     updateStats(data);
                     updateMessageInfo(data);
