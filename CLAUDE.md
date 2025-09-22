@@ -1,226 +1,298 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Этот файл предоставляет руководство для Claude Code (claude.ai/code) при работе с кодом в этом репозитории.
 
-# Всегда отвечай на русском языке. Если генерируешь коммиты/описания/тексты — делай это по-русски, если явно не попросили иначе.
+# Языковые инструкции
+Всегда отвечай на русском языке. Если генерируешь коммиты/описания/тексты — делай это по-русски, если явно не попросили иначе.
 
-## Repository Overview
+## Обзор репозитория
 
-TesterSDR is a Software-Defined Radio (SDR) application for analyzing and demodulating 406 MHz emergency beacon signals (EPIRB/COSPAS-SARSAT). The system supports multiple SDR hardware backends and can process both real-time and recorded IQ data.
+TesterSDR — это приложение для программно-определяемого радио (SDR) для анализа и демодуляции сигналов аварийных радиобуев 406 МГц (EPIRB/COSPAS-SARSAT). Система поддерживает множество SDR-устройств и может обрабатывать как данные в реальном времени, так и записанные IQ-данные.
 
-## Architecture
+## Команды быстрого запуска
 
-### Core Components
-
-**beacon406/** - Main Python module containing:
-- `beacon406-plot.py` - Main visualization application with real-time signal processing, RMS analysis, and PSK demodulation
-- `lib/backends.py` - Unified SDR abstraction layer supporting RTL-SDR, HackRF, Airspy, SDRPlay, RSA306, and file playback
-- `lib/demod.py` - PSK demodulation algorithms with safe message extraction
-- `lib/metrics.py` - Phase metrics and PSK impulse processing
-- `lib/config.py` - Backend selection and configuration (defaults to file playback mode)
-
-**beacon406/apps/** - Applications and utilities:
-- `tester_sdr_http_ui_stage_1_windows_single_file_app.py` - Web-based UI server (port 8737)
-- `beacon_tester_gui.py` - PySide6/Qt GUI application
-- `beacon_tester_web.py` - Flask-based COSPAS beacon tester web UI (port 8738)
-- `beacon_tester_web_debug.py` - Debug version of beacon tester web UI
-- `cospas_beacon_tester_v2.py` - COSPAS-SARSAT beacon tester interface
-- Test scripts: `test_cf32_*.py` - Various CF32 file processing and testing utilities
-- **gen/** subdirectory - Signal generation tools:
-  - `generate_psk406_cf32.py` - Generate test PSK406 signals
-  - `psk406_msg_gen.py` - PSK406 message generator
-  - `backend_hackrf_tx.py` - HackRF transmit backend
-  - `ui_psk406_tx.py` - Transmission UI
-
-**captures/** - Directory for storing CF32 IQ recordings
-
-### Backend System
-
-The application uses a unified backend system (`lib/backends.py`) that abstracts different SDR hardware. Key backends:
-- `SoapyBackend` - Universal interface for SoapySDR-supported devices
-- `FilePlaybackBackend` - Replay CF32 recordings with optional IF offset compensation
-- Hardware-specific implementations for RTL-SDR, HackRF, Airspy, SDRPlay, RSA306
-
-Backend selection is controlled via `lib/config.py`:
-- `BACKEND_NAME`: "auto", "soapy_rtl", "soapy_hackrf", "soapy_airspy", "soapy_sdrplay", "rsa306", "file"
-- `BACKEND_ARGS`: Hardware-specific parameters or file path for playback
-- `"auto"` mode automatically detects available SDR hardware in sequence: RTL-SDR → HackRF → Airspy → SDRPlay → RSA306
-- Each SDR has calibration offsets and optimal sample rates defined in `SDR_CALIB_OFFSETS_DB` and `SDR_DEFAULT_HW_SR`
-
-## Development Commands
-
-### Running the Application
+### Основные команды разработки
 
 ```bash
-# Main plot application (uses backend from config.py)
+# Запуск веб-интерфейса (рекомендуется для большинства задач)
+python beacon406/beacon_tester_web.py  # Открывается на http://127.0.0.1:8738/
+
+# Или используйте Windows batch-файл
+app.bat  # Запускает веб-интерфейс и автоматически открывает браузер
+
+# Запуск основного приложения визуализации
 cd beacon406
 python beacon406-plot.py
 
-# Web UI servers
-python apps/tester_sdr_http_ui_stage_1_windows_single_file_app.py  # Port 8737
-python beacon_tester_web.py  # Port 8738 (COSPAS beacon tester)
-python beacon_tester_web_debug.py  # Debug version of beacon tester
-
-# GUI applications
-python beacon_tester_gui.py  # PySide6/Qt GUI
-python apps/cospas_beacon_tester_v2.py  # COSPAS tester
-
-# Test scripts (various signal processing tests)
-python apps/test_cf32_RMS.py
-python apps/test_cf32_to_phase_msg_FFT.py
-python apps/test_f32_to_beacon.py
-
-# Signal generation and transmission
-python apps/gen/generate_psk406_cf32.py        # Generate test PSK406 signals
-python apps/gen/psk406_msg_gen.py             # PSK406 message generator
-python apps/gen/ui_psk406_tx.py               # Transmission UI
-python apps/gen/backend_hackrf_tx.py          # HackRF transmit backend
-
-# Utilities
-python apps/epirb_hex_decoder.py              # EPIRB hex message decoder
+# Запуск GUI-приложения
+python beacon_tester_gui.py
 ```
 
-### Quick Start
+### Проверка стиля и типизации
 
-Use the provided batch file for easy startup:
+Команды для линтинга и проверки типов не настроены. Стиль кода следует стандартным соглашениям Python.
+
+### Тестирование обработки сигналов
+
 ```bash
-# Windows: Launch HTTP UI server and open browser
-app.bat
+# Тестирование с включенными CF32 файлами
+python beacon406/apps/test_cf32_RMS.py
+python beacon406/apps/test_cf32_to_phase_msg_FFT.py
+
+# Генерация тестовых сигналов
+python beacon406/apps/gen/generate_psk406_cf32.py
+
+# Декодирование EPIRB сообщений из hex
+python beacon406/apps/epirb_hex_decoder.py
 ```
 
-This starts the web-based UI server at http://127.0.0.1:8738/ using `beacon_tester_web.py`.
+## Архитектура
 
-Note: The batch file uses a hardcoded Python path: `C:\Users\alexb\AppData\Local\Programs\Python\Python39\python.exe`
+### Основные компоненты
 
-### Stop Running Services
+**beacon406/** - Основной Python модуль, содержащий:
+- `beacon406-plot.py` - Основное приложение визуализации с обработкой сигналов в реальном времени, RMS-анализом и PSK-демодуляцией
+- `beacon_tester_gui.py` - PySide6/Qt GUI приложение со спектром, водопадом, PSK-демодуляцией
+- `beacon_tester_web.py` - Веб-интерфейс на Flask для тестера маяков COSPAS (порт 8738) с загрузкой и обработкой CF32 файлов
+- `lib/backends.py` - Унифицированный слой абстракции SDR, поддерживающий RTL-SDR, HackRF, Airspy, SDRPlay, RSA306 и воспроизведение файлов
+- `lib/demod.py` - Алгоритмы PSK-демодуляции с безопасным извлечением сообщений
+- `lib/metrics.py` - Фазовые метрики и обработка PSK импульсов
+- `lib/config.py` - Выбор и настройка бэкенда (по умолчанию режим воспроизведения файлов)
+- `lib/hex_decoder.py` - Декодер сообщений EPIRB/COSPAS-SARSAT для 144-битных сообщений маяков
 
-To stop all Flask servers and free up ports:
-```bash
-# Windows: Stop all Python processes and Flask servers
-stop_flask.bat
-```
+**beacon406/apps/** - Приложения и утилиты:
+- `cospas_beacon_tester_v2.py` - Интерфейс тестера маяков COSPAS-SARSAT
+- `epirb_hex_decoder.py` - Автономная утилита декодирования EPIRB HEX сообщений
+- Тестовые скрипты: `test_cf32_*.py` - Различные утилиты обработки и тестирования CF32 файлов
+- **gen/** подкаталог - Инструменты генерации сигналов:
+  - `generate_psk406_cf32.py` - Генерация тестовых PSK406 сигналов
+  - `psk406_msg_gen.py` - Генератор PSK406 сообщений
+  - `backend_hackrf_tx.py` - Бэкенд передачи HackRF
+  - `ui_psk406_tx.py` - Интерфейс передачи
 
-This will terminate all Python processes and specifically check/free ports 8737, 8738, 8739, and 8740.
+**captures/** - Каталог для хранения CF32 IQ записей
+**captures/uploads/** - Каталог для файлов, загруженных через веб-интерфейс
 
-### Dependencies
+### Система бэкендов
 
-Install required packages:
-```bash
-pip install numpy matplotlib pyqtgraph PyQt5 PySide6 scipy pyrtlsdr flask
-# For SDR hardware support:
-pip install SoapySDR
-# For RSA306 support (if using Tektronix hardware):
-pip install pyVISA
-```
+Приложение использует унифицированную систему бэкендов (`lib/backends.py`), которая абстрагирует различные SDR-устройства. Ключевые бэкенды:
+- `SoapyBackend` - Универсальный интерфейс для устройств, поддерживаемых SoapySDR
+- `FilePlaybackBackend` - Воспроизведение CF32 записей с опциональной компенсацией IF смещения
+- Специфичные реализации для RTL-SDR, HackRF, Airspy, SDRPlay, RSA306
 
-**Environment Setup:**
-- Python 3.9+ required (hardcoded path in `app.bat` uses Python 3.9)
-- Environment variables configured in `.env` file: `PYTHONPATH=${workspaceFolder}`
-- VSCode settings support automatic Python path resolution
+Выбор бэкенда контролируется через `lib/config.py`:
+- `BACKEND_NAME`: "auto", "soapy_rtl", "soapy_hackrf", "soapy_airspy", "soapy_sdrplay", "rsa306", "file"
+- `BACKEND_ARGS`: Параметры, специфичные для устройства, или путь к файлу для воспроизведения
+- Режим `"auto"` автоматически обнаруживает доступное SDR-оборудование в последовательности: RTL-SDR → HackRF → Airspy → SDRPlay → RSA306
+- Каждое SDR имеет калибровочные смещения и оптимальные частоты дискретизации, определенные в `SDR_CALIB_OFFSETS_DB` и `SDR_DEFAULT_HW_SR`
 
-### Configuration
+### Архитектура потоков данных
 
-Edit `beacon406/lib/config.py` to select SDR backend:
+Система следует четкому конвейеру данных:
+
+1. **Этап ввода**: SDR-устройство или CF32 файлы → Комплексные IQ отсчеты
+2. **Этап детекции**: Расчет RMS → Детекция импульсов → Извлечение сегментов
+3. **Этап обработки**: Извлечение фазы → Фильтрация → Децимация → Удаление тренда
+4. **Этап демодуляции**: Детекция фронтов → Манчестерское декодирование → Извлечение байтов
+5. **Этап вывода**: HEX сообщение → Декодирование COSPAS-SARSAT → Презентация в UI
+
+### Модель потоков
+
+- **beacon406-plot.py**: Однопоточный с циклом событий matplotlib
+- **beacon_tester_gui.py**: QThread для захвата SDR, главный поток для UI
+- **beacon_tester_web.py**: Flask в многопоточном режиме, отдельная обработка для каждого запроса
+
+## Конфигурация
+
+Отредактируйте `beacon406/lib/config.py` для выбора SDR бэкенда:
 ```python
-# For file playback:
+# Для воспроизведения файлов:
 BACKEND_NAME = "file"
 BACKEND_ARGS = r"C:/work/TesterSDR/captures/your_recording.cf32"
 
-# For RTL-SDR:
+# Для RTL-SDR:
 BACKEND_NAME = "soapy_rtl"
 BACKEND_ARGS = None
 
-# For HackRF:
+# Для HackRF:
 BACKEND_NAME = "soapy_hackrf"
 BACKEND_ARGS = None
 
-# For auto-detection:
+# Для автоопределения:
 BACKEND_NAME = "auto"
 BACKEND_ARGS = None
 ```
 
-## Signal Processing Pipeline
+## Зависимости
 
-### PSK Demodulation Flow
-1. **Edge Detection** (`demod.py`)
-   - `detect_all_steps_by_mean_fast()` - Finds phase transitions using sliding window (40 samples, 0.5 threshold)
-   - Starts at sample 25000 to skip initial transients
-   - Uses cumulative sum for O(1) complexity per step
+Установите необходимые пакеты:
+```bash
+pip install numpy matplotlib pyqtgraph PyQt5 PySide6 scipy flask werkzeug
+# Для поддержки SDR-устройств:
+pip install SoapySDR
+# Для поддержки RSA306 (если используется оборудование Tektronix):
+pip install pyVISA
+# Для прямой поддержки RTL-SDR:
+pip install pyrtlsdr
+```
 
-2. **Data Extraction** (`demod.py`)
-   - `extract_half_bits()` - Samples phase at midpoints between edges
-   - `halfbits_to_bytes_fast()` - Converts Manchester-encoded bits (10→1, 01→0)
-   - Handles up to 500 half-bits (250 bits, 31.25 bytes)
+## Конвейер обработки сигналов
 
-3. **Phase Processing** (`metrics.py`)
-   - LPF at 12 kHz with 129-tap FIR filter (Hamming window)
-   - 4x decimation after filtering
-   - Linear trend removal for frequency offset compensation
-   - Phase zero reference from first 2ms baseline
+### Процесс PSK-демодуляции
+1. **Детекция фронтов** (`demod.py`)
+   - `detect_all_steps_by_mean_fast()` - Находит фазовые переходы используя скользящее окно (40 отсчетов, порог 0.5)
+   - Начинает с отсчета 25000, чтобы пропустить начальные переходные процессы
+   - Использует кумулятивную сумму для сложности O(1) на шаг
 
-4. **Pulse Analysis** (`demod.py:calculate_pulse_params()`)
-   - PosPhase/NegPhase: Mean of high/low plateaus
-   - PhRise/PhFall: 10%-90% transition times with sub-sample interpolation
-   - Ass: Asymmetry metric from τ1/τ2 timing differences
-   - Tmod: Median period between rising edges
+2. **Извлечение данных** (`demod.py`)
+   - `extract_half_bits()` - Выборка фазы в серединах между фронтами
+   - `halfbits_to_bytes_fast()` - Конвертирует манчестерски кодированные биты (10→1, 01→0)
+   - Обрабатывает до 500 полубитов (250 бит, 31.25 байт)
 
-### Key Parameters in `beacon406-plot.py`
-- `TARGET_SIGNAL_HZ`: Target signal frequency (406.037 MHz for beacons)
-- `IF_OFFSET_HZ`: Intermediate frequency offset for tuning (-37 kHz typical)
-- `SAMPLE_RATE_SPS`: Sample rate (typically 1 MHz)
-- `RMS_WIN_MS`: RMS window size in milliseconds (1.0 ms)
-- `VIS_DECIM`: Visualization decimation factor (2048)
-- `PULSE_THRESH_DBM`: Detection threshold (-45 dBm)
-- `READ_CHUNK`: SDR read buffer size (65536 samples)
+3. **Обработка фазы** (`metrics.py`)
+   - ФНЧ на 12 кГц с 129-отводным FIR фильтром (окно Хэмминга)
+   - 4x децимация после фильтрации
+   - Удаление линейного тренда для компенсации частотного сдвига
+   - Нулевая фазовая референция из первых 2мс базовой линии
 
-## File Formats
+4. **Анализ импульсов** (`demod.py:calculate_pulse_params()`)
+   - PosPhase/NegPhase: Среднее высоких/низких плато
+   - PhRise/PhFall: Времена переходов 10%-90% с субдискретной интерполяцией
+   - Ass: Метрика асимметрии из временных различий τ1/τ2
+   - Tmod: Медианный период между нарастающими фронтами
 
-- **CF32 files**: Complex float32 IQ samples (interleaved I/Q pairs)
-- Sample rate and center frequency must match recording parameters
-- File backend applies IF offset compensation during playback
+5. **Декодирование сообщений** (`hex_decoder.py`)
+   - Декодирует 144-битные сообщения маяков COSPAS-SARSAT
+   - Извлекает протокол, код страны, ID маяка, позицию и другие поля
+   - Поддерживает как location, так и user протоколы
 
-## Testing
+### Обработка в веб-интерфейсе (beacon_tester_web.py)
 
-No formal test framework is configured. Test functionality using:
-- Scripts in `apps/` directory for specific signal processing tests
-- File playback mode with recorded signals in `captures/`
-- Real-time testing with connected SDR hardware
+1. **Загрузка CF32 файлов**
+   - Загрузка .cf32 файлов через веб-интерфейс
+   - Файлы сохраняются в каталог `captures/uploads/`
+   - Автоматическая обработка при загрузке
 
-### Test Files Available
-The `captures/` directory contains multiple test recordings for development and testing:
-- **PSK406 test signals**: `psk406msg_f*.cf32` (generated at different frequencies: 50, 75, 100, 150 Hz)
-- **Real SDR captures**: `iq_pulse_406-*.cf32`, `iq_pulse_20250916_*.cf32` (actual beacon recordings)
-- **AIS signals**: `iq_pulse_AIS_*.cf32` (maritime AIS test signals)
-- **DSC signals**: `iq_pulse_DSC_*.cf32` (Digital Selective Calling test data)
-- **AM121 data**: `iq_121*.cf32` (121.5 MHz emergency frequency recordings)
-- **RSA306 captures**: Various Tektronix RSA306 recordings
-- **Floating point data**: `AM121_out.f32` (processed floating point data)
+2. **Детекция сигнала**
+   - `_find_pulse_segment()` - Детекция импульсов на основе RMS
+   - Порог: -60 dBm по умолчанию
+   - Окно: 1.0 мс для расчета RMS
+   - Фильтрует импульсы короче 5 мс
 
-Default test file in config: `psk406msg_f75.cf32` (75 Hz PSK signal)
+3. **Извлечение фазы**
+   - `process_cf32_file()` - Полный конвейер обработки сигнала
+   - Вызывает `process_psk_impulse()` для данных фазы
+   - Вызывает `phase_demod_psk_msg_safe()` для извлечения сообщения
+   - Возвращает данные фазы, временную ось и декодированное HEX сообщение
 
-## Important Notes
+4. **Режимы веб-интерфейса**
+   - "Current" - Отображение метрик в реальном времени
+   - "Message" - Показать таблицу декодированных EPIRB сообщений
+   - "121 MHz Data" - Отображение параметров маяков 121.5 МГц
+   - Визуализация графика фазы с временной осью
 
-- The system uses Windows-style paths with forward slashes (e.g., `C:/work/TesterSDR/`)
-- Python 3.13 compatibility (uses proper imports for typing annotations)
-- Thread-safe implementation for real-time SDR data processing
-- Automatic sample rate decimation for hardware with higher native rates (e.g., 2 MS/s → 1 MS/s)
-- Safe demodulation with `phase_demod_psk_msg_safe()` - never raises exceptions, returns empty results on failure
-- File backend applies inverse IF offset compensation during playback
-- SDR backends handle underflow gracefully without stopping acquisition
-- Environment configuration uses `.env` file and VSCode settings for Python path resolution
-- Claude Code permissions are configured to allow pip installs and Python execution
-- The main application path is hardcoded in `app.bat` to use Python 3.9 from user's AppData
-- Web servers run on different ports to avoid conflicts (8737, 8738, 8739, 8740)
-- No formal testing framework; use scripts in `apps/` for testing specific functionality
+### Ключевые параметры в `beacon406-plot.py`
+- `TARGET_SIGNAL_HZ`: Целевая частота сигнала (406.037 МГц для маяков)
+- `IF_OFFSET_HZ`: Промежуточная частота смещения для настройки (-37 кГц типично)
+- `SAMPLE_RATE_SPS`: Частота дискретизации (обычно 1 МГц)
+- `RMS_WIN_MS`: Размер окна RMS в миллисекундах (1.0 мс)
+- `VIS_DECIM`: Фактор децимации визуализации (2048)
+- `PULSE_THRESH_DBM`: Порог детекции (-45 dBm)
+- `READ_CHUNK`: Размер буфера чтения SDR (65536 отсчетов)
 
-### Port Management
-- **8737**: `tester_sdr_http_ui_stage_1_windows_single_file_app.py`
-- **8738**: `beacon_tester_web.py` (main COSPAS beacon tester)
-- **8739, 8740**: Additional development servers
-- Use `stop_flask.bat` to terminate all Python processes and free ports
+### Ключевые параметры в `beacon_tester_web.py`
+- `SAMPLE_RATE`: 1 МГц для обработки CF32
+- `RMS_THRESH_DBM`: -60.0 dBm порог детекции импульсов
+- `RMS_WIN_MS`: 1.0 мс окно RMS
+- `START_DELAY_MS`: 3.0 мс начальный пропуск
+- `CALIB_DB`: -30.0 dB калибровочное смещение
+- `PSK_BASELINE_MS`: 10.0 мс для фазовой референции
 
-### Batch Files
-- `app.bat`: Start main web UI and open browser automatically
-- `stop_flask.bat`: Stop all Flask servers and Python processes
-- `beacon406/apps/gen/ui_psk406.bat`: Launch PSK406 transmission UI
-- `beacon406/apps/gen/406_msg_send_4sec.bat`: Send 4-second PSK406 message
+## Архитектура веб-интерфейса
+
+Веб-интерфейс (`beacon_tester_web.py`) воспроизводит оригинальный COSPAS Beacon Tester v2:
+
+### Компоненты JavaScript фронтенда
+- **Управление видами**: Обрабатывает режимы Current/Message/121MHz
+- **Рисование графиков**: Фазовый график на canvas с прореживанием
+- **Загрузка файлов**: Асинхронная обработка CF32 файлов
+- **Опрос данных**: Периодические обновления статуса через `/api/status`
+
+### Flask маршруты бэкенда
+- `GET /`: Главная страница интерфейса
+- `POST /api/upload`: Конечная точка обработки CF32 файлов
+- `GET /api/status`: Текущие метрики и данные фазы
+- `POST /api/{measure,run,cont,break}`: Управляющие команды
+
+### Управление состоянием
+- Глобальный dataclass `STATE` хранит текущие измерения
+- Потокобезопасные обновления через контекст запросов Flask
+- Постоянные данные фазы между запросами
+
+## Форматы файлов
+
+- **CF32 файлы**: Комплексные float32 IQ отсчеты (чередующиеся I/Q пары)
+- Частота дискретизации и центральная частота должны соответствовать параметрам записи
+- Файловый бэкенд применяет компенсацию IF смещения при воспроизведении
+
+## Тестирование
+
+Формальный фреймворк тестирования не настроен. Тестируйте функциональность используя:
+- Скрипты в каталоге `apps/` для специфичных тестов обработки сигналов
+- Режим воспроизведения файлов с записанными сигналами в `captures/`
+- Тестирование в реальном времени с подключенным SDR-оборудованием
+- Веб-интерфейс с загрузкой CF32 файлов для быстрого тестирования
+
+### Доступные тестовые файлы
+Каталог `captures/` содержит множество тестовых записей для разработки и тестирования:
+- **Тестовые сигналы PSK406**: `psk406msg_f*.cf32` (сгенерированные на разных частотах: 50, 75, 100, 150 Гц)
+- **Реальные SDR захваты**: `iq_pulse_406-*.cf32`, `iq_pulse_20250916_*.cf32` (актуальные записи маяков)
+- **AIS сигналы**: `iq_pulse_AIS_*.cf32` (морские AIS тестовые сигналы)
+- **DSC сигналы**: `iq_pulse_DSC_*.cf32` (тестовые данные цифрового селективного вызова)
+- **AM121 данные**: `iq_121*.cf32` (записи аварийной частоты 121.5 МГц)
+- **RSA306 захваты**: Различные записи Tektronix RSA306
+
+## Оптимизации производительности
+
+### Алгоритмическая сложность
+- **Детекция фронтов**: O(1) на отсчет используя кумулятивную сумму
+- **Обработка фазы**: Векторизованные операции NumPy
+- **График веб-интерфейса**: Прореживание до ~1000 точек для плавной отрисовки
+- **Конвертация данных**: Пакетная конвертация строковых массивов в числа
+
+### Управление памятью
+- CF32 файлы загружаются частями для больших файлов
+- Кольцевые буферы для данных SDR в реальном времени
+- Децимация уменьшает объем данных в 4 раза после фильтрации
+
+## Важные детали реализации
+
+### Обработка путей
+- Пути в стиле Windows с прямыми слешами (например, `C:/work/TesterSDR/`)
+- Абсолютные пути требуются для файловых операций
+- Batch файлы используют жестко заданные пути Python (обновите при необходимости)
+
+### Версия Python
+- Минимум: Python 3.9 (по умолчанию в batch файле)
+- Протестировано до: Python 3.13
+- Подсказки типов не обязательны, но используются в новом коде
+
+### Обработка ошибок
+- `phase_demod_psk_msg_safe()` никогда не вызывает исключений
+- SDR бэкенды корректно обрабатывают underflow
+- Веб-интерфейс валидирует загрузки перед обработкой
+
+### Сетевые порты
+- Веб-интерфейс: Порт 8738 (COSPAS Beacon Tester)
+- Все интерфейсы привязаны к 127.0.0.1 (только localhost)
+
+### Специфика SDR
+- Децимация частоты дискретизации для устройств > 1 МС/с
+- Компенсация IF смещения в режиме воспроизведения файлов
+- Калибровочные смещения для каждого типа SDR
+- Поддержка автоматической регулировки усиления (AGC) варьируется по устройствам
+
+### UI фреймворки
+- GUI: PySide6 (Qt6) предпочтительно, PyQt5 как запасной вариант
+- Веб: Flask с vanilla JavaScript (без фреймворков)
+- График: Matplotlib с интерактивными функциями

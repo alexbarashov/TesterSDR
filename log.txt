@@ -1,0 +1,53 @@
+PS C:\Users\alexb\AppData\Local\Programs\Microsoft VS Code> & C:\Python313\python.exe c:/work/TesterSDR/beacon406/beacon_tester_web.py
+>>> Starting COSPAS/SARSAT Beacon Tester v2.1
+>>> Interface available at: http://127.0.0.1:8738/
+>>> To stop: Ctrl+C
+ * Serving Flask app 'beacon_tester_web'
+ * Debug mode: on
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:8738
+Press CTRL+C to quit
+ * Restarting with stat
+>>> Starting COSPAS/SARSAT Beacon Tester v2.1
+>>> Interface available at: http://127.0.0.1:8738/
+>>> To stop: Ctrl+C
+ * Debugger is active!
+ * Debugger PIN: 828-673-663
+127.0.0.1 - - [21/Sep/2025 19:36:57] "GET / HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 0
+API STATUS DEBUG: xs_fm_ms length = 0
+API STATUS DEBUG: pos_phase = 0.0
+API STATUS DEBUG: neg_phase = 0.0
+127.0.0.1 - - [21/Sep/2025 19:36:57] "GET /api/status HTTP/1.1" 200 -
+File uploaded: psk406msg_f150.cf32 -> c:\work\TesterSDR\beacon406\..\captures\uploads\psk406msg_f150.cf32
+File size: 4560000 bytes
+DEBUG: phase_data length = 129000
+DEBUG: xs_fm_ms length = 129000
+DEBUG: phase_data sample: min=-1.103, max=1.107
+DEBUG: xs_fm_ms sample: min=0.000, max=515.996
+DEBUG: phase_res type: <class 'dict'>
+DEBUG: phase_res content: {'N': 28, 'PosPhase': 1.100236309272981, 'NegPhase': -1.0997637384107348, 'PhRise': 35.995607186222124, 'PhFall': 35.99574663274065, 'Ass': 2.1006417895437247e-05, 'Tmod': 624.9994942948106}
+File processed successfully: 129000 phase samples, 129000 time samples
+127.0.0.1 - - [21/Sep/2025 19:37:09] "POST /api/upload HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 129000
+API STATUS DEBUG: xs_fm_ms length = 129000
+API STATUS DEBUG: pos_phase = 1.100236309272981
+API STATUS DEBUG: neg_phase = -1.0997637384107348
+API STATUS DEBUG: phase_data sample = [-0.0018359457013519636, -0.0018358982324511062, -0.001835850763550249, -0.0018358032946493917, -0.0018357558257485343]
+API STATUS DEBUG: xs_fm_ms sample = [0.0, 0.004, 0.008, 0.012, 0.016]
+127.0.0.1 - - [21/Sep/2025 19:37:10] "GET /api/status HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 129000
+API STATUS DEBUG: xs_fm_ms length = 129000
+API STATUS DEBUG: pos_phase = 1.100236309272981
+API STATUS DEBUG: neg_phase = -1.0997637384107348
+API STATUS DEBUG: phase_data sample = [-0.0018359457013519636, -0.0018358982324511062, -0.001835850763550249, -0.0018358032946493917, -0.0018357558257485343]
+API STATUS DEBUG: xs_fm_ms sample = [0.0, 0.004, 0.008, 0.012, 0.016]
+127.0.0.1 - - [21/Sep/2025 19:37:27] "GET /api/status HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 129000
+API STATUS DEBUG: xs_fm_ms length = 129000
+API STATUS DEBUG: pos_phase = 1.100236309272981
+API STATUS DEBUG: neg_phase = -1.0997637384107348
+API STATUS DEBUG: phase_data sample = [-0.0018359457013519636, -0.0018358982324511062, -0.001835850763550249, -0.0018358032946493917, -0.0018357558257485343]
+API STATUS DEBUG: xs_fm_ms sample = [0.0, 0.004, 0.008, 0.012, 0.016]
+127.0.0.1 - - [21/Sep/2025 19:37:30] "GET /api/status HTTP/1.1" 200 -
+PS C:\Users\alexb\AppData\Local\Programs\Microsoft VS Code> 

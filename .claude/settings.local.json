@@ -4,7 +4,13 @@
       "Bash(pip install:*)",
       "Bash(python:*)",
       "Bash(dir:*)",
-      "Bash(grep:*)"
+      "Bash(tasklist)",
+      "Bash(findstr:*)",
+      "Bash(del add_state_fields.py)",
+      "Bash(taskkill:*)",
+      "Bash(wmic:*)",
+      "Bash(copy beacon_tester_web.py beacon_tester_web_backup.py)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []

@@ -15,11 +15,14 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button
 import queue
+from tkinter import filedialog
+import tkinter as tk
 
 from lib.backends import make_backend  # NEW: unified SDR adapter
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.config import BACKEND_NAME, BACKEND_ARGS
+from lib.hex_decoder import hex_to_bits, build_table_rows
 
 # SoapySDR import handled by sdr_backends
 # ==========================
@@ -161,7 +164,15 @@ class SoapySlidingRMS:
         self.pulse_data_queue = queue.Queue()
 
         # --- UI: Figure 1 (RMS timeline) ---
-        self.fig1, self.ax_lvl = plt.subplots(num="Sliding RMS — realtime", figsize=(11, 3.2))
+        self.fig1, self.ax_lvl = plt.subplots(num="Sliding RMS — realtime", figsize=(9, 2.5))
+        self.fig1.subplots_adjust(bottom=0.35, top=0.85)  # Освобождаем место для кнопок
+
+        # Позиционируем первое окно слева
+        try:
+            mngr = self.fig1.canvas.manager
+            mngr.window.wm_geometry("+50+50")  # x=50, y=50 от левого верхнего угла экрана
+        except Exception:
+            pass
         try:
             self.fig1.canvas.manager.set_window_title("Sliding RMS — realtime")
         except Exception:
@@ -170,12 +181,67 @@ class SoapySlidingRMS:
         self.ax_lvl.set_xlabel("Время, с")
         self.ax_lvl.set_ylabel("RMS, dBm")
         self.ax_lvl.grid(True, alpha=0.3)
+        # Кнопки выбора backend
+        ax_btn_auto = self.fig1.add_axes([0.02, 0.01, 0.08, 0.06])
+        self.btn_auto = Button(ax_btn_auto, "Auto")
+        self.btn_auto.on_clicked(lambda event: self._on_backend_select(event, "auto"))
+
+        ax_btn_rtl = self.fig1.add_axes([0.11, 0.01, 0.08, 0.06])
+        self.btn_rtl = Button(ax_btn_rtl, "RTL")
+        self.btn_rtl.on_clicked(lambda event: self._on_backend_select(event, "soapy_rtl"))
+
+        ax_btn_hackrf = self.fig1.add_axes([0.20, 0.01, 0.08, 0.06])
+        self.btn_hackrf = Button(ax_btn_hackrf, "HackRF")
+        self.btn_hackrf.on_clicked(lambda event: self._on_backend_select(event, "soapy_hackrf"))
+
+        ax_btn_airspy = self.fig1.add_axes([0.29, 0.01, 0.08, 0.06])
+        self.btn_airspy = Button(ax_btn_airspy, "Airspy")
+        self.btn_airspy.on_clicked(lambda event: self._on_backend_select(event, "soapy_airspy"))
+
+        ax_btn_sdrplay = self.fig1.add_axes([0.38, 0.01, 0.08, 0.06])
+        self.btn_sdrplay = Button(ax_btn_sdrplay, "SDRPlay")
+        self.btn_sdrplay.on_clicked(lambda event: self._on_backend_select(event, "soapy_sdrplay"))
+
+        ax_btn_rsa306 = self.fig1.add_axes([0.47, 0.01, 0.08, 0.06])
+        self.btn_rsa306 = Button(ax_btn_rsa306, "RSA306")
+        self.btn_rsa306.on_clicked(lambda event: self._on_backend_select(event, "rsa306"))
+
+        ax_btn_file = self.fig1.add_axes([0.56, 0.01, 0.08, 0.06])
+        self.btn_file_mode = Button(ax_btn_file, "File")
+        self.btn_file_mode.on_clicked(lambda event: self._on_backend_select(event, "file"))
+
+        # Кнопка выбора файла
+        ax_button_file = self.fig1.add_axes([0.73, 0.01, 0.12, 0.06])
+        self.btn_file = Button(ax_button_file, "Открыть")
+        self.btn_file.on_clicked(self._on_file_select)
+
         ax_button_exit = self.fig1.add_axes([0.86, 0.01, 0.12, 0.06])
         self.btn_exit = Button(ax_button_exit, "Выход")
         self.btn_exit.on_clicked(self._on_exit)
 
+        # Сохраняем все кнопки backend для обновления цвета
+        self.backend_buttons = {
+            "auto": self.btn_auto,
+            "soapy_rtl": self.btn_rtl,
+            "soapy_hackrf": self.btn_hackrf,
+            "soapy_airspy": self.btn_airspy,
+            "soapy_sdrplay": self.btn_sdrplay,
+            "rsa306": self.btn_rsa306,
+            "file": self.btn_file_mode
+        }
+
+        # Подсвечиваем текущий backend
+        self._update_backend_buttons(BACKEND_NAME)
+
         # --- UI: Figure 2 (Pulse + PSK) ---
-        self.fig2, (self.ax_pulse, self.ax_fm) = plt.subplots(2, 1, figsize=(16, 6.4), height_ratios=[1, 1])
+        self.fig2, (self.ax_pulse, self.ax_fm) = plt.subplots(2, 1, figsize=(14, 6.4), height_ratios=[1, 1])
+
+        # Позиционируем второе окно справа от первого
+        try:
+            mngr2 = self.fig2.canvas.manager
+            mngr2.window.wm_geometry("+750+50")  # x=750 (справа от первого), y=50
+        except Exception:
+            pass
 
         try:
             self.fig2.canvas.manager.set_window_title("Pulse window — RMS (top) + Δf (bottom)")
@@ -196,7 +262,7 @@ class SoapySlidingRMS:
         self.ax_fm.set_ylabel("Фаза, Rad")
         self.ax_fm.grid(True, alpha=0.3)
         self.ax_fm.set_ylim(-PSK_YLIMIT_RAD, PSK_YLIMIT_RAD)
-        self.fig2.subplots_adjust(hspace=1, top=0.92,bottom=0.12 )
+        self.fig2.subplots_adjust(hspace=0.5, top=0.92, bottom=0.15)  # Оптимизируем расположение
         self.fig2.suptitle(f"Импульс: RMS (шкала фаза ±{PSK_YLIMIT_RAD:.0f} rad)")
 
         # --- Button: Save IQ (writes CF32, bit-for-bit) ---
@@ -223,48 +289,185 @@ class SoapySlidingRMS:
         self.btn_stop = Button(ax_button_stop, "Стоп")
         self.btn_stop.on_clicked(self._on_toggle_pulse_updates)
 
+        # --- Button: Message decoder ---
+        ax_button_msg = self.fig2.add_axes([0.06, 0.01, 0.15, 0.06])
+        self.btn_msg = Button(ax_button_msg, "Сообщение")
+        self.btn_msg.on_clicked(self._on_show_message)
+
+    # ---- Message decoder window ----
+    def _on_show_message(self, _event):
+        """Показывает декодированное сообщение EPIRB/ELT в отдельном окне."""
+        import matplotlib.pyplot as _plt
+        hex_msg = getattr(self, "last_msg_hex", None)
+
+        if not hex_msg or hex_msg == "None":
+            # Показываем сообщение об отсутствии данных
+            fig, ax = _plt.subplots(figsize=(8, 3))
+            try:
+                fig.canvas.manager.set_window_title("Декодированное сообщение")
+            except Exception:
+                pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, "Нет сообщения для декодирования.\nСначала должен быть обнаружен PSK импульс.",
+                    ha='center', va='center', fontsize=12)
+            _plt.tight_layout()
+            _plt.show(block=False)
+            _plt.pause(0.1)
+            return
+
+        try:
+            # Преобразуем HEX в биты
+            bits = hex_to_bits(hex_msg)
+            if len(bits) != 144:
+                # Дополняем или обрезаем до 144 бит
+                bits = (bits + [0]*144)[:144]
+
+            # Заголовки таблицы
+            headers = ["Binary Range", "Binary Content", "Field Name", "Decoded Value"]
+
+            # Получаем данные для таблицы
+            rows = build_table_rows(bits)
+
+            # Создаем окно Matplotlib с таблицей
+            fig, ax = _plt.subplots(figsize=(14, 8))
+            ax.axis('off')
+
+            # Заголовок окна
+            fig.suptitle(f"EPIRB/ELT Beacon Parameters Decoder\nHEX: {hex_msg}",
+                        fontsize=11, fontweight='bold')
+
+            # Создаем таблицу
+            tbl = ax.table(cellText=[headers] + rows,
+                          loc='center',
+                          cellLoc='left',
+                          colWidths=[0.12, 0.25, 0.28, 0.35])
+
+            # Настройка стилей таблицы
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(8)
+
+            # Стиль заголовка
+            for i in range(len(headers)):
+                cell = tbl[(0, i)]
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+                cell.set_height(0.05)
+
+            # Чередующиеся цвета строк
+            for i in range(1, len(rows) + 1):
+                for j in range(len(headers)):
+                    cell = tbl[(i, j)]
+                    if i % 2 == 0:
+                        cell.set_facecolor('#f0f0f0')
+                    cell.set_height(0.04)
+
+                    # Выделяем важные поля дополнительным цветом
+                    if j == 2:  # колонка Field Name
+                        field_name = rows[i-1][2].lower()
+                        if any(key in field_name for key in ['country', 'mmsi', 'lat', 'lon', 'id']):
+                            cell.set_facecolor('#e8f4ff')
+
+            # Настройка окна
+            try:
+                fig.canvas.manager.set_window_title("EPIRB/ELT Beacon Decoder")
+            except Exception:
+                pass
+
+            _plt.tight_layout()
+            _plt.show(block=False)
+            _plt.pause(0.1)
+
+        except Exception as e:
+            # Показываем ошибку
+            fig, ax = _plt.subplots(figsize=(8, 3))
+            try:
+                fig.canvas.manager.set_window_title("Ошибка декодирования")
+            except Exception:
+                pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, f"Ошибка декодирования сообщения:\n{str(e)}\n\nHEX: {hex_msg}",
+                    ha='center', va='center', fontsize=10)
+            _plt.tight_layout()
+            _plt.show(block=False)
+            _plt.pause(0.1)
+
     # ---- Params window (snapshot, table) ----
     def _on_show_params(self, _event):
         import matplotlib.pyplot as _plt
         m = getattr(self, "last_phase_metrics", None)
         hex_msg = getattr(self, "last_msg_hex", None)
 
-        fig, ax = _plt.subplots(figsize=(8.4, 5.0))
-        try:
-            fig.canvas.manager.set_window_title("Phase Parameters — snapshot")
-        except Exception:
-            pass
-        ax.axis('off')
-
         if not m:
+            fig, ax = _plt.subplots(figsize=(8, 3))
+            try:
+                fig.canvas.manager.set_window_title("Phase Parameters")
+            except Exception:
+                pass
+            ax.axis('off')
             ax.text(0.5, 0.5, "No parameters yet — trigger a PSK pulse first.",
-                    ha='center', va='center')
+                    ha='center', va='center', fontsize=12)
             _plt.tight_layout()
             _plt.show(block=False)
             _plt.pause(0.1)
             return
 
+        # Заголовки таблицы
+        headers = ["Parameter", "Value"]
+
+        # Строки данных
         rows = [
-            ("Target Signal (Hz)",     f"{m.get('Target Signal (Hz)', float('nan')):.3f}"),
-            ("Frequency Offset (Hz)",  f"{m.get('Frequency Offset (Hz)', float('nan')):.3f}"),
-            ("Message Duration (ms)",  f"{m.get('Message Duration (ms)', float('nan')):.3f}"),
-            ("Carrier Duration (ms)",  f"{m.get('Carrier Duration (ms)', float('nan')):.3f}"),
-            ("Pos (rad)",              f"{m.get('Pos (rad)', float('nan')):.3f}"),
-            ("Neg (rad)",              f"{m.get('Neg (rad)', float('nan')):.3f}"),
-            ("Rise (μs)",              f"{m.get('Rise (μs)', float('nan')):.1f}"),
-            ("Fall (μs)",              f"{m.get('Fall (μs)', float('nan')):.1f}"),
-            ("Asymmetry (%)",          f"{m.get('Asymmetry (%)', float('nan')):.3f}"),
-            ("Fmod (Hz)",              f"{m.get('Fmod (Hz)', float('nan')):.3f}"),
-            ("Power (RMS, dBm)",       f"{m.get('Power (RMS, dBm)', float('nan')):.2f}"),
-            ("HEX",                    str(hex_msg) if hex_msg is not None else ""),
+            ["Target Signal (Hz)",     f"{m.get('Target Signal (Hz)', float('nan')):.3f}"],
+            ["Frequency Offset (Hz)",  f"{m.get('Frequency Offset (Hz)', float('nan')):.3f}"],
+            ["Message Duration (ms)",  f"{m.get('Message Duration (ms)', float('nan')):.3f}"],
+            ["Carrier Duration (ms)",  f"{m.get('Carrier Duration (ms)', float('nan')):.3f}"],
+            ["Pos (rad)",              f"{m.get('Pos (rad)', float('nan')):.3f}"],
+            ["Neg (rad)",              f"{m.get('Neg (rad)', float('nan')):.3f}"],
+            ["Rise (μs)",              f"{m.get('Rise (μs)', float('nan')):.1f}"],
+            ["Fall (μs)",              f"{m.get('Fall (μs)', float('nan')):.1f}"],
+            ["Asymmetry (%)",          f"{m.get('Asymmetry (%)', float('nan')):.3f}"],
+            ["Fmod (Hz)",              f"{m.get('Fmod (Hz)', float('nan')):.3f}"],
+            ["Power (RMS, dBm)",       f"{m.get('Power (RMS, dBm)', float('nan')):.2f}"],
+            ["HEX",                    str(hex_msg) if hex_msg is not None else ""]
         ]
 
-        table = ax.table(cellText=rows, colLabels=["Parameter", "Value"],
-                        cellLoc='left', colLoc='left', loc='center')
-        table.auto_set_font_size(True)
-        table.scale(1.1, 1.2)
+        # Создаем окно
+        fig, ax = _plt.subplots(figsize=(10, 6))
+        ax.axis('off')
 
+        # Создаем таблицу
+        tbl = ax.table(cellText=[headers] + rows,
+                      loc='center',
+                      cellLoc='left',
+                      colWidths=[0.5, 0.5])
+
+        # Настройка стилей таблицы
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(10)
+
+        # Стиль заголовка
+        for i in range(len(headers)):
+            cell = tbl[(0, i)]
+            cell.set_facecolor('#4CAF50')
+            cell.set_text_props(weight='bold', color='white')
+            cell.set_height(0.06)
+
+        # Чередующиеся цвета строк
+        for i in range(1, len(rows) + 1):
+            for j in range(len(headers)):
+                cell = tbl[(i, j)]
+                if i % 2 == 0:
+                    cell.set_facecolor('#f0f0f0')
+                cell.set_height(0.05)
+
+        # Заголовок окна
         fig.suptitle("Phase Parameters (snapshot)", fontsize=12, fontweight='bold')
+
+        # Настройка окна
+        try:
+            fig.canvas.manager.set_window_title("Phase Parameters")
+        except Exception:
+            pass
+
         _plt.tight_layout()
         _plt.show(block=False)
         _plt.pause(0.1)
@@ -281,13 +484,6 @@ class SoapySlidingRMS:
             pretty = self.backend.pretty_status()
         except Exception:
             pretty = None
-
-        fig, ax = plt.subplots(figsize=(9.5, 5.6))
-        try:
-            fig.canvas.manager.set_window_title("SDR Status — snapshot")
-        except Exception:
-            pass
-        ax.axis('off')
 
         preferred = [
             "backend", "driver",
@@ -308,6 +504,10 @@ class SoapySlidingRMS:
             if k not in seen:
                 keys.append(k); seen.add(k)
 
+        # Заголовки таблицы
+        headers = ["Key", "Value"]
+
+        # Строки данных
         rows = []
         for k in keys:
             v = st.get(k, "")
@@ -316,20 +516,58 @@ class SoapySlidingRMS:
                     v = ", ".join(f"{kk}={vv}" for kk, vv in v.items())
                 except Exception:
                     v = str(v)
-            rows.append((str(k), str(v)))
+            rows.append([str(k), str(v)])
 
         if not rows:
-            rows = [("status", "нет данных")]
+            rows = [["status", "нет данных"]]
 
-        table = ax.table(cellText=rows, colLabels=["Key", "Value"],
-                        cellLoc='left', colLoc='left', loc='center')
-        table.auto_set_font_size(True)
-        table.scale(1.1, 1.2)
+        # Создаем окно
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.axis('off')
 
+        # Создаем таблицу
+        tbl = ax.table(cellText=[headers] + rows,
+                      loc='center',
+                      cellLoc='left',
+                      colWidths=[0.4, 0.6])
+
+        # Настройка стилей таблицы
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(10)
+
+        # Стиль заголовка
+        for i in range(len(headers)):
+            cell = tbl[(0, i)]
+            cell.set_facecolor('#4CAF50')
+            cell.set_text_props(weight='bold', color='white')
+            cell.set_height(0.05)
+
+        # Чередующиеся цвета строк
+        for i in range(1, len(rows) + 1):
+            for j in range(len(headers)):
+                cell = tbl[(i, j)]
+                if i % 2 == 0:
+                    cell.set_facecolor('#f0f0f0')
+                cell.set_height(0.04)
+
+                # Выделяем важные поля
+                if j == 0:  # колонка Key
+                    key_name = rows[i-1][0].lower()
+                    if any(word in key_name for word in ['actual', 'file_path', 'backend', 'driver']):
+                        cell.set_facecolor('#e8f4ff')
+
+        # Заголовок окна
         title = "SDR Status (snapshot)"
         if pretty:
             title += " — см. также консольный вывод"
         fig.suptitle(title, fontsize=12, fontweight='bold')
+
+        # Настройка окна
+        try:
+            fig.canvas.manager.set_window_title("SDR Status")
+        except Exception:
+            pass
+
         plt.tight_layout()
         plt.show(block=False)
         plt.pause(0.1)
@@ -372,6 +610,286 @@ class SoapySlidingRMS:
     """
 
     # ---------- UI callbacks ----------
+    def _on_backend_select(self, _event, backend_name):
+        """Переключает backend SDR."""
+        print(f"\n[INFO] Переключение на backend: {backend_name}")
+
+        # Если выбран file, сначала нужно выбрать файл
+        if backend_name == "file":
+            # Открываем диалог выбора файла
+            root = tk.Tk()
+            root.withdraw()
+            file_path = filedialog.askopenfilename(
+                title="Выберите CF32 файл",
+                filetypes=[(
+                    "CF32 files", "*.cf32"),
+                    ("All files", "*.*")
+                ],
+                initialdir=str(ROOT / "captures")
+            )
+            root.destroy()
+
+            if not file_path:
+                print("[INFO] Выбор файла отменён")
+                return
+
+            device_args = {"path": file_path}
+        else:
+            device_args = None
+
+        # Останавливаем текущий backend
+        try:
+            self.stop()
+            time.sleep(0.1)
+        except Exception:
+            pass
+
+        # Создаём новый backend
+        try:
+            from lib.backends import make_backend
+            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (backend_name == "file") else {}
+
+            self.backend = make_backend(
+                backend_name,
+                sample_rate=SAMPLE_RATE_SPS,
+                center_freq=float(CENTER_FREQ_HZ),
+                gain_db=float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
+                agc=bool(ENABLE_AGC),
+                corr_ppm=int(FREQ_CORR_PPM),
+                device_args=device_args,
+                **extra_kwargs,
+            )
+
+            # Обновляем параметры
+            try:
+                _st = self.backend.get_status() or {}
+                self.sample_rate = float(
+                    _st.get("actual_sample_rate_sps",
+                            getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
+                )
+                print(f"[INFO] Backend {backend_name} активирован. Sample Rate: {self.sample_rate:.2f} Sa/s")
+
+                # Печать статуса
+                print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+            except Exception:
+                pass
+
+            # Обновляем параметры окна RMS
+            self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+
+            # Сбрасываем состояние
+            self._stop = False
+            self.sample_counter = 0
+            self.samples_start_abs = 0
+            self.full_samples = np.empty(0, dtype=np.complex64)
+            self.full_idx = np.empty(0, dtype=np.int64)
+            self.full_rms = np.empty(0, dtype=np.float32)
+            self.tail_p = np.empty(0, dtype=np.float32)
+            self.last_iq_seg = None
+            self.last_core_gate = None
+            self.in_pulse = False
+            self.pulse_start_abs = None
+            self.nco_phase = 0.0
+            self.last_impulse_freq_hz = 0.0
+
+            # Очищаем историю
+            self.rms_history.clear()
+            self.time_history.clear()
+
+            # Очищаем очередь импульсов
+            while not self.pulse_data_queue.empty():
+                try:
+                    self.pulse_data_queue.get_nowait()
+                except Exception:
+                    pass
+
+            # Перезапускаем поток чтения
+            if hasattr(self, 'reader_thread'):
+                try:
+                    self.reader_thread.join(timeout=0.5)
+                except Exception:
+                    pass
+
+            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
+
+            # Обновляем цвета кнопок
+            self._update_backend_buttons(backend_name)
+
+            print(f"[INFO] Backend {backend_name} успешно активирован")
+
+        except Exception as e:
+            print(f"[ERROR] Ошибка активации backend {backend_name}: {e}")
+            # Попытаемся вернуться к исходному backend
+            self._restore_original_backend()
+
+    def _update_backend_buttons(self, active_backend):
+        """Обновляет цвета кнопок backend."""
+        for backend_name, button in self.backend_buttons.items():
+            if backend_name == active_backend:
+                button.color = 'lightgreen'
+                button.hovercolor = 'lightgreen'
+            else:
+                button.color = '0.85'
+                button.hovercolor = '0.95'
+
+    def _restore_original_backend(self):
+        """Восстанавливает исходный backend при ошибке."""
+        try:
+            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
+            self.backend = make_backend(
+                BACKEND_NAME,
+                sample_rate=SAMPLE_RATE_SPS,
+                center_freq=float(CENTER_FREQ_HZ),
+                gain_db=float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
+                agc=bool(ENABLE_AGC),
+                corr_ppm=int(FREQ_CORR_PPM),
+                device_args=BACKEND_ARGS,
+                **extra_kwargs,
+            )
+            _st = self.backend.get_status() or {}
+            self.sample_rate = float(
+                _st.get("actual_sample_rate_sps",
+                        getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
+            )
+            self._stop = False
+            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
+        except Exception:
+            pass
+
+    def _on_file_select(self, _event):
+        """Открывает диалог выбора CF32 файла и перезагружает backend."""
+        print("\n[INFO] Нажата кнопка Файл")
+
+        # Создаём скрытое tk окно для диалога
+        root = tk.Tk()
+        root.withdraw()
+
+        # Открываем диалог выбора файла
+        file_path = filedialog.askopenfilename(
+            title="Выберите CF32 файл",
+            filetypes=[
+                ("CF32 files", "*.cf32"),
+                ("All files", "*.*")
+            ],
+            initialdir=str(ROOT / "captures")
+        )
+
+        root.destroy()
+
+        if not file_path:
+            print("[INFO] Выбор файла отменён")
+            return
+
+        print(f"[INFO] Выбран файл: {file_path}")
+
+        # Останавливаем текущий backend
+        try:
+            self.stop()
+            time.sleep(0.1)  # Даём время на остановку
+        except Exception:
+            pass
+
+        # Пересоздаём backend с новым файлом
+        try:
+            from lib.backends import make_backend
+            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ}
+
+            self.backend = make_backend(
+                "file",
+                sample_rate=SAMPLE_RATE_SPS,
+                center_freq=float(CENTER_FREQ_HZ),
+                gain_db=float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
+                agc=bool(ENABLE_AGC),
+                corr_ppm=int(FREQ_CORR_PPM),
+                device_args={"path": file_path},
+                **extra_kwargs,
+            )
+
+            # Обновляем параметры
+            try:
+                _st = self.backend.get_status() or {}
+                self.sample_rate = float(
+                    _st.get("actual_sample_rate_sps",
+                            getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
+                )
+                print(f"[INFO] Новый файл загружен. Sample Rate: {self.sample_rate:.2f} Sa/s")
+
+                # Печать статуса
+                print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+            except Exception:
+                pass
+
+            # Обновляем параметры окна RMS после смены sample_rate
+            self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+
+            # Сбрасываем состояние
+            self._stop = False
+            self.sample_counter = 0
+            self.samples_start_abs = 0
+            self.full_samples = np.empty(0, dtype=np.complex64)
+            self.full_idx = np.empty(0, dtype=np.int64)
+            self.full_rms = np.empty(0, dtype=np.float32)
+            self.tail_p = np.empty(0, dtype=np.float32)
+            self.last_iq_seg = None
+            self.last_core_gate = None
+            self.in_pulse = False
+            self.pulse_start_abs = None
+            self.nco_phase = 0.0
+            self.last_impulse_freq_hz = 0.0
+
+            # Очищаем историю
+            self.rms_history.clear()
+            self.time_history.clear()
+
+            # Очищаем очередь импульсов
+            while not self.pulse_data_queue.empty():
+                try:
+                    self.pulse_data_queue.get_nowait()
+                except Exception:
+                    pass
+
+            # Перезапускаем поток чтения
+            if hasattr(self, 'reader_thread'):
+                try:
+                    self.reader_thread.join(timeout=0.5)
+                except Exception:
+                    pass
+
+            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
+
+            print(f"[INFO] Файл {file_path} успешно загружен и начат анализ")
+
+        except Exception as e:
+            print(f"[ERROR] Ошибка загрузки файла: {e}")
+            # Попытаемся вернуться к исходному backend
+            try:
+                extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
+                self.backend = make_backend(
+                    BACKEND_NAME,
+                    sample_rate=SAMPLE_RATE_SPS,
+                    center_freq=float(CENTER_FREQ_HZ),
+                    gain_db=float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
+                    agc=bool(ENABLE_AGC),
+                    corr_ppm=int(FREQ_CORR_PPM),
+                    device_args=BACKEND_ARGS,
+                    **extra_kwargs,
+                )
+                _st = self.backend.get_status() or {}
+                self.sample_rate = float(
+                    _st.get("actual_sample_rate_sps",
+                            getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
+                )
+                self._stop = False
+                self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                self.reader_thread.start()
+            except Exception:
+                pass
+
     def _on_exit(self, _event):
         print("\n[INFO] Нажата кнопка Выход")
         self.stop()
