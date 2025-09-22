@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 Этот файл предоставляет руководство для Claude Code (claude.ai/code) при работе с кодом в этом репозитории.
 
 # Языковые инструкции
@@ -270,7 +272,7 @@ pip install pyrtlsdr
 ### Обработка путей
 - Пути в стиле Windows с прямыми слешами (например, `C:/work/TesterSDR/`)
 - Абсолютные пути требуются для файловых операций
-- Batch файлы используют жестко заданные пути Python (обновите при необходимости)
+- Batch файлы используют жестко заданные пути Python (текущий путь в app.bat: `C:\Users\alexb\AppData\Local\Programs\Python\Python39\python.exe` - обновите при необходимости)
 
 ### Версия Python
 - Минимум: Python 3.9 (по умолчанию в batch файле)

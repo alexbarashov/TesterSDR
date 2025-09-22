@@ -665,7 +665,7 @@ HTML_PAGE = """
         let currentView = 'phase';
         let currentTimeScale = 10; // Текущий масштаб времени в процентах (по умолчанию 10%)
         const MESSAGE_DURATION_MS = 440; // Длительность сообщения в миллисекундах
-        const PHASE_START_OFFSET_MS = 160; // Начинаем отображение графика с 160мс
+        const PHASE_START_OFFSET_MS = 0; // Начинаем отображение графика с 0мс (без смещения)
 
         function resizeCanvas() {
             canvas.width = canvas.clientWidth;
@@ -742,6 +742,19 @@ HTML_PAGE = """
             }
             // Всегда вызываем fetchData() для обновления - специальные режимы обрабатываются внутри fetchData()
             fetchData();
+        }
+
+        // Функция расчета смещения в зависимости от масштаба
+        function getOffsetForScale(scale) {
+            switch(scale) {
+                case 1: return 1;  // 1% -> -1ms
+                case 2: return 2;  // 2% -> -2ms
+                case 5: return 4;  // 5% -> -4ms
+                case 10:
+                case 20:
+                case 50: return 5; // 10%-50% -> -5ms
+                default: return 5; // fallback
+            }
         }
 
         function onTimeScaleChange() {
@@ -825,9 +838,18 @@ HTML_PAGE = """
                 ctx.lineTo(x, height);
                 ctx.stroke();
 
-                // Временные метки с учетом смещения 160мс и масштаба
+                // Временные метки с учетом масштаба
                 const scaledDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100);
-                const timeMs = (PHASE_START_OFFSET_MS + i * scaledDuration / 8).toFixed(1);
+                let startOffset;
+                if (currentTimeScale === 100) {
+                    startOffset = 0; // При 100% начинаем с 0мс
+                } else {
+                    // Для других масштабов: начало модуляции - смещение в зависимости от масштаба
+                    const preambleMs = data?.preamble_ms || 10.0; // fallback к baseline_ms
+                    const offsetMs = getOffsetForScale(currentTimeScale);
+                    startOffset = Math.max(0, preambleMs - offsetMs);
+                }
+                const timeMs = (startOffset + i * scaledDuration / 8).toFixed(1);
                 ctx.fillText(timeMs, x - 10, height - 5);
             }
 
@@ -838,6 +860,28 @@ HTML_PAGE = """
             ctx.moveTo(0, height / 2);
             ctx.lineTo(width, height / 2);
             ctx.stroke();
+
+            // Пунктирные линии на уровне ±1.1 радиан
+            ctx.strokeStyle = '#999999';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]); // Пунктир: 5px линия, 5px пропуск
+
+            // Линия +1.1 рад (фиксированный масштаб 1.25 рад)
+            const y_plus_1_1 = height / 2 - (1.1 / 1.25) * (height / 2);
+            ctx.beginPath();
+            ctx.moveTo(0, y_plus_1_1);
+            ctx.lineTo(width, y_plus_1_1);
+            ctx.stroke();
+
+            // Линия -1.1 рад
+            const y_minus_1_1 = height / 2 + (1.1 / 1.25) * (height / 2);
+            ctx.beginPath();
+            ctx.moveTo(0, y_minus_1_1);
+            ctx.lineTo(width, y_minus_1_1);
+            ctx.stroke();
+
+            // Возвращаем сплошную линию для дальнейшего рисования
+            ctx.setLineDash([]);
 
             // Y-axis labels (будут обновлены после определения масштаба)
             ctx.fillStyle = '#6c757d';
@@ -882,20 +926,17 @@ HTML_PAGE = """
                 if (phaseData && phaseData.length > 1) {
                     console.log('DEBUG: Starting to draw REAL phase graph with', phaseData.length, 'points');
 
-                    // Автоматическое определение масштаба фазы
-                    const phaseMin = phaseData.reduce((min, v) => Math.min(min, v), Infinity);
-                    const phaseMax = phaseData.reduce((max, v) => Math.max(max, v), -Infinity);
-                    const phaseRange = Math.max(Math.abs(phaseMin), Math.abs(phaseMax));
-                    const phaseScale = phaseRange > 0 ? phaseRange : 0.001;
+                    // Фиксированный масштаб оси Y: ±1.25 радиан
+                    const phaseScale = 1.25;
 
-                    console.log(`DEBUG: Phase range: min=${phaseMin.toFixed(6)}, max=${phaseMax.toFixed(6)}, scale=${phaseScale.toFixed(6)}`);
+                    console.log(`DEBUG: Using fixed phase scale: ±${phaseScale} rad`);
 
-                    // Обновляем Y-axis метки с учетом автоматического масштаба
+                    // Обновляем Y-axis метки с фиксированным масштабом
                     ctx.fillStyle = '#6c757d';
                     ctx.font = '12px Arial';
-                    ctx.fillText(`+${phaseScale.toFixed(3)} rad`, 5, 15);
+                    ctx.fillText(`+${phaseScale.toFixed(2)} rad`, 5, 15);
                     ctx.fillText('0', 5, height / 2 + 4);
-                    ctx.fillText(`-${phaseScale.toFixed(3)} rad`, 5, height - 10);
+                    ctx.fillText(`-${phaseScale.toFixed(2)} rad`, 5, height - 10);
 
                     ctx.strokeStyle = '#FF0000'; // Красный для реального графика фазы
                     ctx.lineWidth = 2;
@@ -926,7 +967,15 @@ HTML_PAGE = """
                     }
 
                     // Временное окно для отображения
-                    const windowStart = PHASE_START_OFFSET_MS; // 160.0 мс
+                    let windowStart;
+                    if (currentTimeScale === 100) {
+                        windowStart = 0; // При 100% начинаем с 0мс
+                    } else {
+                        // Для других масштабов: начало модуляции - смещение в зависимости от масштаба
+                        const preambleMs = data.preamble_ms || 10.0; // fallback к baseline_ms из кода
+                        const offsetMs = getOffsetForScale(currentTimeScale);
+                        windowStart = Math.max(0, preambleMs - offsetMs);
+                    }
                     const windowDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100.0); // 440 * scale/100
                     const windowEnd = windowStart + windowDuration;
 
