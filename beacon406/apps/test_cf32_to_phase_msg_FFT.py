@@ -59,6 +59,9 @@ FILE_IQ_16 = r"iq_pulse_406-1m-25k.cf32"
 FILE_IQ_17 = r"rsa406_pulse_20250911_133404_dc.cf32"
 FILE_IQ_18 = r"rsa406_pulse_20250911_133526_dc.cf32"
 
+#UI_gen
+FILE_IQ_19 = r"UI_iq_1m.cf32"
+
 file_out_iq = r"psk_out_f50.f32"
 
 # === path hack (fixed to project root) ===
@@ -75,7 +78,7 @@ def find_root(project_name: str) -> Path:
 ROOT = find_root("TesterSDR")
 
 # формируем шаблон пути (сразу строка!)
-FILE_PATH = str(ROOT / "captures" / FILE_IQ_1)
+FILE_PATH = str(ROOT / "captures" / FILE_IQ_19)
 file_out = str(ROOT / "captures" / file_out_iq)
 
 

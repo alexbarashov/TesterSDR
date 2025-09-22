@@ -13,4 +13,4 @@ SDR mode :
 +SDRplay - the best of the best !!!
 +File
 +Textronix
--auto
++auto

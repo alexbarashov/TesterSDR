@@ -1,0 +1,39 @@
+PS C:\Users\alexb> & C:/Users/alexb/AppData/Local/Programs/Python/Python39/python.exe c:/work/TesterSDR/beacon406/beacon_tester_web.py
+>>> Starting COSPAS/SARSAT Beacon Tester v2.1
+>>> Interface available at: http://127.0.0.1:8738/
+>>> To stop: Ctrl+C
+ * Serving Flask app 'beacon_tester_web'
+ * Debug mode: on
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:8738
+Press CTRL+C to quit   
+ * Restarting with stat
+>>> Starting COSPAS/SARSAT Beacon Tester v2.1
+>>> Interface available at: http://127.0.0.1:8738/
+>>> To stop: Ctrl+C
+ * Debugger is active!
+ * Debugger PIN: 217-877-429
+127.0.0.1 - - [20/Sep/2025 14:06:53] "GET / HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 0
+API STATUS DEBUG: pos_phase = 0.0
+API STATUS DEBUG: neg_phase = 0.0
+127.0.0.1 - - [20/Sep/2025 14:06:53] "GET /api/status HTTP/1.1" 200 -
+File uploaded: psk406msg_f100.cf32 -> c:\work\TesterSDR\beacon406\..\captures\uploads\psk406msg_f100.cf32
+File size: 4560000 bytes
+DEBUG: phase_data length = 129000
+DEBUG: xs_fm_ms length = 129000
+DEBUG: phase_data sample: min=-1.104, max=1.109
+DEBUG: xs_fm_ms sample: min=0.000, max=515.996
+DEBUG: phase_res type: <class 'dict'>
+DEBUG: phase_res content: {'N': 28, 'PosPhase': 1.1002346454485146, 'NegPhase': -1.0997654022352015, 'PhRise': 25.911763932860985, 'PhFall': 25.95613853461951, 'Ass': 1.1285887731434012e-05, 'Tmod': 624.9996831218377}
+File processed successfully: 129000 phase samples, 129000 time samples
+127.0.0.1 - - [20/Sep/2025 14:07:03] "POST /api/upload HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 129000
+API STATUS DEBUG: pos_phase = 1.1002346454485146
+API STATUS DEBUG: neg_phase = -1.0997654022352015
+127.0.0.1 - - [20/Sep/2025 14:07:04] "GET /api/status HTTP/1.1" 200 -
+API STATUS DEBUG: phase_data length = 129000
+API STATUS DEBUG: pos_phase = 1.1002346454485146
+API STATUS DEBUG: neg_phase = -1.0997654022352015
+127.0.0.1 - - [20/Sep/2025 14:07:11] "GET /api/status HTTP/1.1" 200 -
+PS C:\Users\alexb>  

@@ -1,0 +1,16 @@
+{
+  "target_signal_hz": "406037000",
+  "if_offset_hz": "-37000",
+  "freq_corr_hz": "750",
+  "tx_gain_db": "30",
+  "phase_low": "-1.1",
+  "phase_high": "1.1",
+  "front": "100",
+  "hex_message": "FFFED080020000007FDFFB0020B783E0F66C",
+  "FILE_IQ": "C:/work/TesterSDR/captures/UI_iq_1m.cf32",
+  "repeat": "1",
+  "gap_s": "1",
+  "fs_gen": "1000000",
+  "fs_tx": "1000000",
+  "hw_amp": false
+}
