@@ -22,12 +22,18 @@ python beacon406/beacon_tester_web.py  # Открывается на http://127.
 # Или используйте Windows batch-файл
 app.bat  # Запускает веб-интерфейс и автоматически открывает браузер
 
+# Остановка Flask серверов и освобождение портов
+stop_flask.bat  # Завершает все Python процессы и освобождает порты 8737-8740
+
 # Запуск основного приложения визуализации
 cd beacon406
 python beacon406-plot.py
 
 # Запуск GUI-приложения
 python beacon_tester_gui.py
+
+# Запуск GUI передатчика PSK406
+python beacon406/apps/gen/ui_psk406_tx.py
 ```
 
 ### Проверка стиля и типизации
@@ -43,6 +49,9 @@ python beacon406/apps/test_cf32_to_phase_msg_FFT.py
 
 # Генерация тестовых сигналов
 python beacon406/apps/gen/generate_psk406_cf32.py
+
+# Циклическая передача сигнала через HackRF (каждые 4 секунды)
+beacon406/apps/gen/406_msg_send_4sec.bat
 
 # Декодирование EPIRB сообщений из hex
 python beacon406/apps/epirb_hex_decoder.py
@@ -63,14 +72,16 @@ python beacon406/apps/epirb_hex_decoder.py
 - `lib/hex_decoder.py` - Декодер сообщений EPIRB/COSPAS-SARSAT для 144-битных сообщений маяков
 
 **beacon406/apps/** - Приложения и утилиты:
-- `cospas_beacon_tester_v2.py` - Интерфейс тестера маяков COSPAS-SARSAT
 - `epirb_hex_decoder.py` - Автономная утилита декодирования EPIRB HEX сообщений
 - Тестовые скрипты: `test_cf32_*.py` - Различные утилиты обработки и тестирования CF32 файлов
-- **gen/** подкаталог - Инструменты генерации сигналов:
+- `test_f32_to_beacon.py` - Тестирование обработки сигналов маяков
+- **gen/** подкаталог - Инструменты генерации и передачи сигналов:
   - `generate_psk406_cf32.py` - Генерация тестовых PSK406 сигналов
   - `psk406_msg_gen.py` - Генератор PSK406 сообщений
   - `backend_hackrf_tx.py` - Бэкенд передачи HackRF
-  - `ui_psk406_tx.py` - Интерфейс передачи
+  - `ui_psk406_tx.py` - GUI интерфейс передачи
+  - `ui_prefs.json` - Настройки интерфейса передатчика
+  - `406_msg_send_4sec.bat` - Циклическая передача через HackRF
 
 **captures/** - Каталог для хранения CF32 IQ записей
 **captures/uploads/** - Каталог для файлов, загруженных через веб-интерфейс
@@ -269,6 +280,11 @@ pip install pyrtlsdr
 
 ## Важные детали реализации
 
+### Управление процессами Windows
+- `stop_flask.bat` - завершает все Python процессы и освобождает порты 8737-8740
+- Автоматическое управление портами Flask серверов
+- Поддержка множественных Flask экземпляров на разных портах
+
 ### Обработка путей
 - Пути в стиле Windows с прямыми слешами (например, `C:/work/TesterSDR/`)
 - Абсолютные пути требуются для файловых операций
@@ -298,3 +314,14 @@ pip install pyrtlsdr
 - GUI: PySide6 (Qt6) предпочтительно, PyQt5 как запасной вариант
 - Веб: Flask с vanilla JavaScript (без фреймворков)
 - График: Matplotlib с интерактивными функциями
+
+### Система генерации сигналов
+- Полный модуль генерации и передачи в `beacon406/apps/gen/`
+- GUI интерфейс передачи с настройками в JSON
+- Поддержка циклической передачи через HackRF
+- Интеграция с PothosSDR через `hackrf_transfer.exe`
+
+### Среда разработки
+- VS Code настройки в `.vscode/settings.json`
+- PYTHONPATH конфигурация в `.env`
+- Git репозиторий инициализирован (без remote)

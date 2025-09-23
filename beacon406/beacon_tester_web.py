@@ -899,8 +899,14 @@ HTML_PAGE = """
         const PHASE_START_OFFSET_MS = 0; // Начинаем отображение графика с 0мс (без смещения)
 
         function resizeCanvas() {
-            canvas.width = canvas.clientWidth;
-            canvas.height = canvas.clientHeight;
+            // Убеждаемся, что canvas существует
+            const currentCanvas = document.getElementById('phaseChart');
+            if (currentCanvas) {
+                canvas = currentCanvas;  // Обновляем глобальную ссылку
+                ctx = canvas.getContext('2d');  // Обновляем контекст
+                canvas.width = canvas.clientWidth;
+                canvas.height = canvas.clientHeight;
+            }
         }
 
         window.addEventListener('resize', resizeCanvas);
@@ -1010,6 +1016,13 @@ HTML_PAGE = """
         
         function drawChart(data) {
             console.log('DEBUG: drawChart called with currentView:', currentView);
+
+            // Убеждаемся, что работаем с актуальным canvas
+            const currentCanvas = document.getElementById('phaseChart');
+            if (currentCanvas) {
+                canvas = currentCanvas;
+                ctx = canvas.getContext('2d');
+            }
             console.log('DEBUG: data object:', data);
             console.log('DEBUG: data.hex_message:', data ? data.hex_message : 'no data');
             console.log('DEBUG: data.phase_data type/length:', data ? typeof data.phase_data + '/' + (data.phase_data ? data.phase_data.length : 'null') : 'no data');
@@ -1022,6 +1035,10 @@ HTML_PAGE = """
                 console.log('DEBUG: Drawing frequency chart');
                 drawFrequencyChart(data);
                 return;
+            } else if (currentView === 'fr_pwr') {
+                console.log('DEBUG: Drawing frequency/power charts');
+                drawFrequencyPowerChart(data);
+                return;
             } else if (currentView === '121_data') {
                 console.log('DEBUG: Drawing 121_data table');
                 draw121DataTable(data);
@@ -1033,7 +1050,7 @@ HTML_PAGE = """
                 console.log('DEBUG: Using hex_message from file:', hexFromFile);
                 drawMessageTable(hexFromFile);
                 return;
-            } else if (currentView !== 'phase') {
+            } else if (currentView === 'inburst_fr' || currentView === 'fr_stability') {
                 // Для других режимов просто очищаем canvas
                 const width = canvas.width;
                 const height = canvas.height;
@@ -1101,7 +1118,7 @@ HTML_PAGE = """
             ctx.stroke();
 
             // Пунктирные линии на уровне ±1.1 радиан
-            ctx.strokeStyle = '#999999';
+            ctx.strokeStyle = '#FF0000'; // Красные тонкие линии
             ctx.lineWidth = 1;
             ctx.setLineDash([5, 5]); // Пунктир: 5px линия, 5px пропуск
 
@@ -1177,7 +1194,7 @@ HTML_PAGE = """
                     ctx.fillText('0', 5, height / 2 + 4);
                     ctx.fillText(`-${phaseScale.toFixed(2)} rad`, 5, height - 10);
 
-                    ctx.strokeStyle = '#FF0000'; // Красный для реального графика фазы
+                    ctx.strokeStyle = '#0066FF'; // Синий для реального графика фазы
                     ctx.lineWidth = 2;
                     ctx.beginPath();
 
@@ -1397,20 +1414,34 @@ HTML_PAGE = """
             // Создаем контейнер для HTML таблицы
             const chartContainer = document.querySelector('.chart-container');
 
-            // Данные для 406 MHz таблицы из скриншота
+// Извлекаем реальные данные из объекта data для колонки Current
+            const freq_khz = data.freq_hz ? (data.freq_hz / 1000 + 406000).toFixed(3) : '0.000';
+            const pos_phase = data.phase_pos_rad ? data.phase_pos_rad.toFixed(2) : '0.00';
+            const neg_phase = data.phase_neg_rad ? data.phase_neg_rad.toFixed(2) : '0.00';
+            const t_rise = data.t_rise_mcs ? data.t_rise_mcs.toFixed(2) : '0.00';
+            const t_fall = data.t_fall_mcs ? data.t_fall_mcs.toFixed(2) : '0.00';
+            const power_wt = data.p_wt ? data.p_wt.toFixed(2) : '0.00';
+            const prise_ms = data.prise_ms ? data.prise_ms.toFixed(2) : '0.00';
+            const bitrate = data.bitrate_bps ? data.bitrate_bps.toFixed(2) : '0.00';
+            const asymmetry = data.symmetry_pct ? data.symmetry_pct.toFixed(2) : '0.00';
+            const preamble = data.preamble_ms ? data.preamble_ms.toFixed(2) : '0.00';
+            const total_duration = data.total_ms ? data.total_ms.toFixed(2) : '0.00';
+            const rep_period = data.rep_period_s ? data.rep_period_s.toFixed(2) : '0.00';
+
+            // Данные для 406 MHz таблицы с реальными значениями в колонке Current
             const params406 = [
-                ['Frequency, kHz', '40600.000', '40600.000', '0.000', '406025.954', '0.000'],
-                ['+Phase deviation, rad', '1.00', '1.20', '0.00', '1.09', '0.00'],
-                ['-Phase deviation, rad', '-1.00', '-1.20', '0.00', '-1.11', '0.00'],
-                ['Phase time rise, mcs', '50.00', '250.00', '0.00', '111.07', '0.00'],
-                ['Phase time fall, mcs', '50.00', '250.00', '0.00', '70.36', '0.00'],
-                ['Power, Wt', '3.16', '7.94', '0.00', '0.00', '0.00'],
-                ['Power rise, ms', '0.00', '0.00', '0.00', '0.00', '0.00'],
-                ['Bit Rate, bps', '396.00', '404.00', '0.00', '400.01', '0.00'],
-                ['Asymmetry, %', '0.00', '5.00', '0.00', '0.00', '0.00'],
-                ['CW Preamble, ms', '158.40', '161.60', '0.00', '157.53', '0.00'],
-                ['Total burst duration, ms', '435.60', '520.00', '0.00', '518.76', '0.00'],
-                ['Repetition period, s', '47.50', '52.50', '0.00', '0.00', '0.00'],
+                ['Frequency, kHz', '40600.000', '40600.000', '0.000', freq_khz, '0.000'],
+                ['+Phase deviation, rad', '1.00', '1.20', '0.00', pos_phase, '0.00'],
+                ['-Phase deviation, rad', '-1.00', '-1.20', '0.00', neg_phase, '0.00'],
+                ['Phase time rise, mcs', '50.00', '250.00', '0.00', t_rise, '0.00'],
+                ['Phase time fall, mcs', '50.00', '250.00', '0.00', t_fall, '0.00'],
+                ['Power, Wt', '3.16', '7.94', '0.00', power_wt, '0.00'],
+                ['Power rise, ms', '0.00', '0.00', '0.00', prise_ms, '0.00'],
+                ['Bit Rate, bps', '396.00', '404.00', '0.00', bitrate, '0.00'],
+                ['Asymmetry, %', '0.00', '5.00', '0.00', asymmetry, '0.00'],
+                ['CW Preamble, ms', '158.40', '161.60', '0.00', preamble, '0.00'],
+                ['Total burst duration, ms', '435.60', '520.00', '0.00', total_duration, '0.00'],
+                ['Repetition period, s', '47.50', '52.50', '0.00', rep_period, '0.00'],
                 ['Delta Rep. period, s', '4.00', '0.00', '0.00', '0.00', '0.00']
             ];
 
@@ -1619,11 +1650,16 @@ HTML_PAGE = """
                 document.getElementById('message').textContent = data.message;
             }
 
-            // Обновление фазовых значений
-            document.getElementById('phasePlus').textContent = (data.phase_pos_rad * 57.2958).toFixed(2);
-            document.getElementById('phaseMinus').textContent = (data.phase_neg_rad * 57.2958).toFixed(2);
-            document.getElementById('tRise').textContent = data.t_rise_mcs.toFixed(1);
-            document.getElementById('tFall').textContent = data.t_fall_mcs.toFixed(1);
+            // Обновление фазовых значений (только если элементы существуют)
+            const phasePlusElem = document.getElementById('phasePlus');
+            const phaseMinusElem = document.getElementById('phaseMinus');
+            const tRiseElem = document.getElementById('tRise');
+            const tFallElem = document.getElementById('tFall');
+
+            if (phasePlusElem) phasePlusElem.textContent = (data.phase_pos_rad * 57.2958).toFixed(2);
+            if (phaseMinusElem) phaseMinusElem.textContent = (data.phase_neg_rad * 57.2958).toFixed(2);
+            if (tRiseElem) tRiseElem.textContent = data.t_rise_mcs.toFixed(1);
+            if (tFallElem) tFallElem.textContent = data.t_fall_mcs.toFixed(1);
         }
 
         function updateStats(data) {
@@ -1647,6 +1683,204 @@ HTML_PAGE = """
         }
 
 
+        function drawFrequencyPowerChart(data) {
+            console.log('DEBUG: drawFrequencyPowerChart called');
+
+            const canvas = document.getElementById('phaseChart');
+            if (!canvas) {
+                console.error('Canvas not found!');
+                return;
+            }
+
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            const midY = height / 2;
+
+            ctx.clearRect(0, 0, width, height);
+
+            // === ВЕРХНИЙ ГРАФИК: Power (dBm) ===
+
+            // Сетка для верхнего графика
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+
+            // Горизонтальные линии (Power: 36-41 dBm)
+            for (let i = 0; i <= 5; i++) {
+                const y = (midY / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Вертикальные линии (время: 0-60 минут)
+            for (let i = 0; i <= 10; i++) {
+                const x = (width / 10) * i;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, midY);
+                ctx.stroke();
+            }
+
+            // Y-axis labels для Power
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '11px Arial';
+            ctx.fillText('41.0', 5, 15);
+            ctx.fillText('40.0', 5, midY * 0.2);
+            ctx.fillText('39.0', 5, midY * 0.4);
+            ctx.fillText('38.0', 5, midY * 0.6);
+            ctx.fillText('37.0', 5, midY * 0.8);
+            ctx.fillText('36.0', 5, midY - 5);
+
+            // X-axis labels для времени (верхний график)
+            for (let i = 0; i <= 10; i++) {
+                const x = (width / 10) * i;
+                const minutes = (i * 6).toString().padStart(2, '0'); // 0, 6, 12, 18... 60 минут
+                ctx.fillText(minutes, x - 8, midY - 5);
+            }
+
+            // Красные пунктирные референсные линии для Power
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+
+            // Верхний предел (41.0 dBm)
+            const y_power_max = midY * 0.0;
+            ctx.beginPath();
+            ctx.moveTo(0, y_power_max);
+            ctx.lineTo(width, y_power_max);
+            ctx.stroke();
+
+            // Нижний предел (36.0 dBm)
+            const y_power_min = midY * 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, y_power_min);
+            ctx.lineTo(width, y_power_min);
+            ctx.stroke();
+
+            ctx.setLineDash([]);
+
+            // График данных Power - синяя линия, 60 точек, центр на 37 dBm
+            ctx.strokeStyle = '#0066FF';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            for (let i = 0; i < 60; i++) {
+                const x = (i / 59) * width; // 60 точек по ширине
+                // Power = 37 ± небольшие колебания
+                const powerValue = 37 + Math.sin(i * 0.2) * 0.8 + Math.sin(i * 0.05) * 0.5; // колебания ±1.3 dBm
+                const y = midY - ((powerValue - 36) / 5) * midY; // масштаб 36-41 dBm
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // === РАЗДЕЛИТЕЛЬ ===
+            ctx.strokeStyle = '#adb5bd';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, midY);
+            ctx.lineTo(width, midY);
+            ctx.stroke();
+
+            // === НИЖНИЙ ГРАФИК: Frequency (Hz) ===
+
+            // Сетка для нижнего графика
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+
+            // Горизонтальные линии (Frequency: 406022-406028 Hz)
+            for (let i = 0; i <= 6; i++) {
+                const y = midY + (midY / 6) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Вертикальные линии для нижнего графика
+            for (let i = 0; i <= 10; i++) {
+                const x = (width / 10) * i;
+                ctx.beginPath();
+                ctx.moveTo(x, midY);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+            }
+
+            // Y-axis labels для Frequency (406022-406028 Hz, центр 406025)
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '11px Arial';
+            ctx.fillText('406028', 5, midY + 15);
+            ctx.fillText('406027', 5, midY + midY * 0.15);
+            ctx.fillText('406026', 5, midY + midY * 0.3);
+            ctx.fillText('406025', 5, midY + midY * 0.5); // центр
+            ctx.fillText('406024', 5, midY + midY * 0.7);
+            ctx.fillText('406023', 5, midY + midY * 0.85);
+            ctx.fillText('406022', 5, height - 10);
+
+            // X-axis labels для времени (нижний график)
+            for (let i = 0; i <= 10; i++) {
+                const x = (width / 10) * i;
+                const minutes = (i * 6).toString().padStart(2, '0');
+                ctx.fillText(minutes, x - 8, height - 5);
+            }
+
+            // Красные пунктирные референсные линии для Frequency
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+
+            // Верхний предел (406028 Hz)
+            const y_freq_max = midY + midY * 0.0;
+            ctx.beginPath();
+            ctx.moveTo(0, y_freq_max);
+            ctx.lineTo(width, y_freq_max);
+            ctx.stroke();
+
+            // Нижний предел (406022 Hz)
+            const y_freq_min = midY + midY * 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, y_freq_min);
+            ctx.lineTo(width, y_freq_min);
+            ctx.stroke();
+
+            ctx.setLineDash([]);
+
+            // График данных Frequency - синяя линия, 60 точек, центр на 406025 Hz
+            ctx.strokeStyle = '#0066FF';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            for (let i = 0; i < 60; i++) {
+                const x = (i / 59) * width; // 60 точек по ширине
+                // Frequency = 406025 ± небольшие колебания
+                const freqValue = 406025 + Math.sin(i * 0.15) * 1.5 + Math.sin(i * 0.08) * 1.0; // колебания ±2.5 Hz
+                const y = midY + midY - ((freqValue - 406022) / 6) * midY; // масштаб 406022-406028 Hz
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Заголовки графиков
+            ctx.fillStyle = '#495057';
+            ctx.font = '12px Arial';
+            ctx.fillText('Power vs Time', width/2 - 50, 20);
+            ctx.fillText('Frequency vs Time', width/2 - 60, midY + 20);
+
+            // Подписи единиц измерения
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '10px Arial';
+            ctx.fillText('dBm', 5, 45);
+            ctx.fillText('Hz', 5, midY + 45);
+            ctx.fillText('Time, min', width - 60, midY - 5);
+            ctx.fillText('Time, min', width - 60, height - 5);
+
+            console.log('DEBUG: drawFrequencyPowerChart completed');
+        }
+
         function updateDisplay(data) {
             console.log('=== updateDisplay called ===');
             console.log('currentView:', currentView);
@@ -1656,6 +1890,9 @@ HTML_PAGE = """
             const chartContainer = document.querySelector('.chart-container');
             if (!chartContainer.querySelector('#phaseChart')) {
                 chartContainer.innerHTML = '<canvas id="phaseChart"></canvas>';
+                // Обновляем глобальные переменные после восстановления canvas
+                canvas = document.getElementById('phaseChart');
+                ctx = canvas.getContext('2d');
                 resizeCanvas(); // Переинициализируем размеры canvas
             }
 
@@ -1671,11 +1908,22 @@ HTML_PAGE = """
                 document.getElementById('message').textContent = data.message;
             }
 
-            // Обновление фазовых значений
-            document.getElementById('phasePlus').textContent = (data.phase_pos_rad * 57.2958).toFixed(2);
-            document.getElementById('phaseMinus').textContent = (data.phase_neg_rad * 57.2958).toFixed(2);
-            document.getElementById('tRise').textContent = data.t_rise_mcs.toFixed(1);
-            document.getElementById('tFall').textContent = data.t_fall_mcs.toFixed(1);
+            // Обновление фазовых значений (только если элементы существуют)
+            const phasePlusElem = document.getElementById('phasePlus');
+            const phaseMinusElem = document.getElementById('phaseMinus');
+            const tRiseElem = document.getElementById('tRise');
+            const tFallElem = document.getElementById('tFall');
+
+            if (phasePlusElem) phasePlusElem.textContent = (data.phase_pos_rad * 57.2958).toFixed(2);
+            if (phaseMinusElem) phaseMinusElem.textContent = (data.phase_neg_rad * 57.2958).toFixed(2);
+            if (tRiseElem) tRiseElem.textContent = data.t_rise_mcs.toFixed(1);
+            if (tFallElem) tFallElem.textContent = data.t_fall_mcs.toFixed(1);
+
+            // Обновление элементов для режима fr_pwr
+            const freqElem = document.getElementById('freq');
+            const powerElem = document.getElementById('power');
+            if (freqElem) freqElem.textContent = (data.beacon_frequency / 1000000).toFixed(3);  // MHz
+            if (powerElem) powerElem.textContent = data.p_wt.toFixed(3);  // Wt
 
             // Обновление статистики
             updateStats(data);
