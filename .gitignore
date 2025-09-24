@@ -33,3 +33,8 @@ captures/
 *.svg
 *.pdf
 .cache/
+
+/nul
+
+log.txt
+console.txt

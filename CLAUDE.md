@@ -80,6 +80,7 @@ python beacon406/apps/epirb_hex_decoder.py
   - `psk406_msg_gen.py` - Генератор PSK406 сообщений
   - `backend_hackrf_tx.py` - Бэкенд передачи HackRF
   - `ui_psk406_tx.py` - GUI интерфейс передачи
+  - `make_multitone_156mhz.py` - Генератор многотональных тестовых сигналов для 156 МГц
   - `ui_prefs.json` - Настройки интерфейса передатчика
   - `406_msg_send_4sec.bat` - Циклическая передача через HackRF
 
@@ -325,3 +326,10 @@ pip install pyrtlsdr
 - VS Code настройки в `.vscode/settings.json`
 - PYTHONPATH конфигурация в `.env`
 - Git репозиторий инициализирован (без remote)
+- `.gitignore` настроен для исключения больших SDR файлов, кешей и временных данных
+
+### Управление файлами данных
+- Каталог `captures/` исключен из Git для экономии места
+- Поддерживаются форматы: `.cf32`, `.iq`, `.f32`, `.bin`, `.wav`, `.raw`, `.dat`
+- Подкаталог `captures/uploads/` для файлов, загруженных через веб-интерфейс
+- Тестовые сигналы доступны для разработки: PSK406, AIS, DSC, AM121
