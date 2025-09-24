@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from lib.hex_decoder import hex_to_bits, build_table_rows
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
+from lib.processing_fm import fm_discriminator
 import numpy as np
 from werkzeug.utils import secure_filename
 
@@ -103,6 +104,22 @@ def process_cf32_file(file_path):
             remove_slope=True,  # выравниваем фазу по горизонтали
         )
 
+        # Обработка FM для получения частотной девиации
+        fm_result = fm_discriminator(
+            iq=iq_seg,
+            fs=sample_rate,
+            pre_lpf_hz=50000,  # антиалиасный фильтр 50 кГц
+            decim=4,            # децимация в 4 раза
+            smooth_hz=15000,    # сглаживание 15 кГц
+            detrend=False,      # отключить удаление линейного тренда
+            center=False,       # без центрирования
+            fir_taps=127        # длина FIR фильтра
+        )
+
+        fm_freq = fm_result.get("freq_hz", [])
+        fm_xs = fm_result.get("xs_ms", [])
+
+
         if not pulse_result or "phase_rad" not in pulse_result:
             return {"error": "No pulse detected"}
 
@@ -142,6 +159,8 @@ def process_cf32_file(file_path):
             "msg_hex": msg_hex if msg_hex else "",
             "phase_data": phase_list,
             "xs_fm_ms": xs_list,
+            "fm_data": fm_freq.tolist() if isinstance(fm_freq, np.ndarray) else list(fm_freq) if fm_freq is not None else [],
+            "fm_xs_ms": fm_xs.tolist() if isinstance(fm_xs, np.ndarray) else list(fm_xs) if fm_xs is not None else [],
             "edges": edges_list,
             "file_processed": True
         }
@@ -240,6 +259,8 @@ class BeaconState:
     current_file: str = ""  # Путь к текущему загруженному файлу
     phase_data: list = field(default_factory=list)  # Данные фазы для графика
     xs_fm_ms: list = field(default_factory=list)  # Временная шкала для графика фазы
+    fm_data: list = field(default_factory=list)  # Данные FM частоты для графика
+    fm_xs_ms: list = field(default_factory=list)  # Временная шкала для FM графика
 
     # Текущие измерения (пустые до загрузки файла)
     fs1_hz: float = 0.0
@@ -1008,7 +1029,7 @@ HTML_PAGE = """
             console.log('Time scale changed to:', currentTimeScale + '%');
 
             // Перерисовываем график с новым масштабом если данные загружены
-            if (currentView === 'phase') {
+            if (currentView === 'phase' || currentView === 'inburst_fr') {
                 fetchData(); // Обновляем отображение с новым масштабом
             }
         }
@@ -1050,11 +1071,11 @@ HTML_PAGE = """
                 console.log('DEBUG: Using hex_message from file:', hexFromFile);
                 drawMessageTable(hexFromFile);
                 return;
-            } else if (currentView === 'inburst_fr' || currentView === 'fr_stability') {
-                // Для других режимов просто очищаем canvas
-                const width = canvas.width;
-                const height = canvas.height;
-                ctx.clearRect(0, 0, width, height);
+            } else if (currentView === 'inburst_fr') {
+                console.log('DEBUG: Drawing FM chart for inburst_fr');
+                drawFMChart(data);
+                return;
+            } else if (currentView === 'fr_stability') {
 
                 // Показываем заглушку
                 ctx.fillStyle = '#666';
@@ -1946,7 +1967,243 @@ HTML_PAGE = """
             }
         }
 
-        function drawRiseFallChart(data) {
+
+        function drawFMChart(data) {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            ctx.clearRect(0, 0, width, height);
+
+            // Сетка (как в Phase графике)
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+
+            // Горизонтальные линии сетки
+            for (let i = 0; i <= 10; i++) {
+                const y = (height / 10) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Вертикальные линии сетки с временными метками
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '12px Arial';
+            for (let i = 0; i <= 8; i++) {
+                const x = (width / 8) * i;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+
+                // Временные метки с учетом масштаба (используем те же переменные что и Phase)
+                const scaledDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100);
+                let startOffset;
+                if (currentTimeScale === 100) {
+                    startOffset = 0; // При 100% начинаем с 0мс
+                } else {
+                    // Для других масштабов
+                    const preambleMs = data?.preamble_ms || 10.0;
+                    const offsetMs = getOffsetForScale(currentTimeScale);
+                    startOffset = Math.max(0, preambleMs - offsetMs);
+                }
+                const timeMs = (startOffset + i * scaledDuration / 8).toFixed(1);
+                ctx.fillText(timeMs, x - 10, height - 5);
+            }
+
+            // Нулевая линия (центральная)
+            ctx.strokeStyle = '#adb5bd';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, height / 2);
+            ctx.lineTo(width, height / 2);
+            ctx.stroke();
+
+            // Автомасштабирование: определяем масштаб на основе данных
+            let FM_SCALE = 3000; // Значение по умолчанию ±3000 Hz
+
+            // Сначала получаем отфильтрованные точки для определения масштаба
+            let filteredPointsForScale = [];
+            if (data) {
+                let fmData = (data.fm_data || []).map(v => Number(v));
+                let xsData = (data.fm_xs_ms || []).map(v => Number(v));
+
+                if (fmData.length > 1 && xsData.length === fmData.length) {
+                    // Вычисляем временное окно
+                    let windowStart;
+                    if (currentTimeScale === 100) {
+                        windowStart = 0;
+                    } else {
+                        const preambleMs = data.preamble_ms || 10.0;
+                        const offsetMs = getOffsetForScale(currentTimeScale);
+                        windowStart = Math.max(0, preambleMs - offsetMs);
+                    }
+                    const windowDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100.0);
+                    const windowEnd = windowStart + windowDuration;
+
+                    // Фильтруем точки по временному окну
+                    for (let i = 0; i < fmData.length; i++) {
+                        const timeMs = xsData[i];
+                        if (Number.isFinite(timeMs) && timeMs >= windowStart && timeMs <= windowEnd) {
+                            filteredPointsForScale.push({
+                                time: timeMs,
+                                fm: fmData[i]
+                            });
+                        }
+                    }
+
+                    // Определяем автоматический масштаб
+                    if (filteredPointsForScale.length > 0) {
+                        const maxAbsFM = Math.max(...filteredPointsForScale.map(p => Math.abs(p.fm)));
+                        // Добавляем небольшой запас (10%) и округляем до красивого числа
+                        const scaledMax = maxAbsFM * 1.1;
+                        if (scaledMax <= 1500) {
+                            FM_SCALE = 1500;
+                        } else if (scaledMax <= 3000) {
+                            FM_SCALE = 3000;
+                        } else if (scaledMax <= 5000) {
+                            FM_SCALE = 5000;
+                        } else if (scaledMax <= 10000) {
+                            FM_SCALE = 10000;
+                        } else {
+                            FM_SCALE = Math.ceil(scaledMax / 1000) * 1000; // Округляем до ближайшей тысячи
+                        }
+                    }
+                }
+            }
+
+            // Динамические пунктирные линии на основе масштаба
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+
+            // Определяем шаги сетки на основе масштаба
+            let gridSteps = [];
+            if (FM_SCALE <= 1500) {
+                gridSteps = [250, 500, 750, 1000];
+            } else if (FM_SCALE <= 3000) {
+                gridSteps = [500, 1000, 1500, 2000, 2500];
+            } else if (FM_SCALE <= 5000) {
+                gridSteps = [1000, 2000, 3000, 4000];
+            } else if (FM_SCALE <= 10000) {
+                gridSteps = [2000, 4000, 6000, 8000];
+            } else {
+                const step = Math.floor(FM_SCALE / 5 / 1000) * 1000;
+                gridSteps = [step, step*2, step*3, step*4];
+            }
+
+            // Рисуем горизонтальные линии сетки
+            for (const step of gridSteps) {
+                if (step < FM_SCALE) {
+                    const y_plus = height / 2 - (step / FM_SCALE) * (height / 2);
+                    const y_minus = height / 2 + (step / FM_SCALE) * (height / 2);
+
+                    // Положительная линия
+                    ctx.beginPath();
+                    ctx.moveTo(0, y_plus);
+                    ctx.lineTo(width, y_plus);
+                    ctx.stroke();
+
+                    // Отрицательная линия
+                    ctx.beginPath();
+                    ctx.moveTo(0, y_minus);
+                    ctx.lineTo(width, y_minus);
+                    ctx.stroke();
+                }
+            }
+
+            // Возвращаем сплошную линию
+            ctx.setLineDash([]);
+
+            // Динамические подписи оси Y
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '12px Arial';
+
+            // Максимум
+            ctx.fillText(`+${(FM_SCALE/1000).toFixed(1)}kHz`, 5, 15);
+
+            // Промежуточные значения
+            for (const step of gridSteps) {
+                if (step < FM_SCALE) {
+                    const y_plus = height / 2 - (step / FM_SCALE) * (height / 2);
+                    const y_minus = height / 2 + (step / FM_SCALE) * (height / 2);
+
+                    ctx.fillText(`+${(step/1000).toFixed(1)}kHz`, 5, y_plus - 2);
+                    ctx.fillText(`-${(step/1000).toFixed(1)}kHz`, 5, y_minus - 2);
+                }
+            }
+
+            // 0
+            ctx.fillText('0', 5, height / 2 - 2);
+
+            // Минимум
+            ctx.fillText(`-${(FM_SCALE/1000).toFixed(1)}kHz`, 5, height - 5);
+
+            // График FM данных - используем уже отфильтрованные данные
+            if (filteredPointsForScale.length > 0) {
+                console.log('DEBUG drawFMChart: Using filteredPointsForScale with', filteredPointsForScale.length, 'points');
+                console.log(`DEBUG: FM_SCALE = ${FM_SCALE} Hz`);
+
+                // Вычисляем временное окно для отображения
+                let windowStart;
+                if (currentTimeScale === 100) {
+                    windowStart = 0;
+                } else {
+                    const preambleMs = data.preamble_ms || 10.0;
+                    const offsetMs = getOffsetForScale(currentTimeScale);
+                    windowStart = Math.max(0, preambleMs - offsetMs);
+                }
+                const windowDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100.0);
+
+                // Децимация если слишком много точек
+                let pointsToDraw = filteredPointsForScale;
+                if (filteredPointsForScale.length > 1000) {
+                    const step = Math.floor(filteredPointsForScale.length / 1000);
+                    pointsToDraw = filteredPointsForScale.filter((_, i) => i % step === 0);
+                }
+
+                // Рисуем график FM (зеленая линия как в Phase)
+                ctx.strokeStyle = '#28a745';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+
+                for (let i = 0; i < pointsToDraw.length; i++) {
+                    const point = pointsToDraw[i];
+                    const normalizedTime = (point.time - windowStart) / windowDuration;
+                    const x = normalizedTime * width;
+                    // Используем автоматический масштаб
+                    const y = height / 2 - (point.fm / FM_SCALE) * (height / 2);
+
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+                ctx.stroke();
+
+                // Информация о данных
+                const maxFM = Math.max(...filteredPointsForScale.map(p => Math.abs(p.fm)));
+                ctx.fillStyle = '#6c757d';
+                ctx.font = '10px Arial';
+                ctx.fillText(`Max deviation: ±${maxFM.toFixed(0)} Hz (Scale: ±${(FM_SCALE/1000).toFixed(1)}kHz)`, width - 200, 15);
+            } else if (data && (data.fm_data || []).length === 0) {
+                // Показываем сообщение, если нет данных
+                ctx.fillStyle = '#666';
+                ctx.font = '16px Arial';
+                ctx.fillText('No FM data available', width/2 - 80, height/2);
+                ctx.font = '12px Arial';
+                ctx.fillText('Please load a CF32 file first', width/2 - 80, height/2 + 25);
+            } else if (data) {
+                // Есть данные, но ни одна точка не попала в временное окно
+                ctx.fillStyle = '#888';
+                ctx.font = '14px Arial';
+                ctx.fillText('No FM data in current time window', width/2 - 120, height/2);
+            }
+        }
+
+                function drawRiseFallChart(data) {
             const width = canvas.width;
             const height = canvas.height;
             const midY = height / 2;
@@ -2585,7 +2842,9 @@ def api_status():
         'freq_hz': STATE.freq_hz,
         't_mod': STATE.t_mod,
         'phase_data': STATE.phase_data,
-        'xs_fm_ms': STATE.xs_fm_ms
+        'xs_fm_ms': STATE.xs_fm_ms,
+        'fm_data': STATE.fm_data,
+        'fm_xs_ms': STATE.fm_xs_ms
     })
 
 @app.route('/api/measure', methods=['POST'])
@@ -2689,6 +2948,8 @@ def api_upload():
             # Сохраняем данные фазы для графика
             STATE.phase_data = processing_result.get("phase_data", [])
             STATE.xs_fm_ms = processing_result.get("xs_fm_ms", [])
+            STATE.fm_data = processing_result.get("fm_data", [])
+            STATE.fm_xs_ms = processing_result.get("fm_xs_ms", [])
             STATE.message = f"Processed: {filename} - Message: {STATE.hex_message[:16]}..."
 
             print(f"File processed successfully: {len(STATE.phase_data)} phase samples, {len(STATE.xs_fm_ms)} time samples")
