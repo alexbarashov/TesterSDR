@@ -17,7 +17,11 @@
       "Bash(tasklist:*)",
       "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" \"beacon406/beacon_tester_web.py\")",
       "Bash(curl:*)",
-      "Bash(cmd /c:*)"
+      "Bash(cmd /c:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(set IQ_FILE_PATH=../captures/psk406msg_f75.cf32)",
+      "Bash(chcp:*)"
     ],
     "deny": [],
     "ask": []
