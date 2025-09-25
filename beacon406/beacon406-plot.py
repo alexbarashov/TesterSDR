@@ -18,7 +18,7 @@ import queue
 from tkinter import filedialog
 import tkinter as tk
 
-from lib.backends import make_backend  # NEW: unified SDR adapter
+from lib.backends import make_backend, safe_make_backend
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.config import BACKEND_NAME, BACKEND_ARGS
@@ -88,9 +88,12 @@ class SoapySlidingRMS:
         # Params table snapshot
         self.last_phase_metrics = None
         self.last_msg_hex = None
+
+
         extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
-        # --- SDR init via backend adapter ---
-        self.backend = make_backend(
+
+        # --- SAFE: пробуем создать backend; при отсутствии SDR — тихо уходим в режим ожидания файла
+        self.backend = safe_make_backend(
             BACKEND_NAME,
             sample_rate=SAMPLE_RATE_SPS,
             center_freq=float(CENTER_FREQ_HZ),
@@ -98,33 +101,29 @@ class SoapySlidingRMS:
             agc=bool(ENABLE_AGC),
             corr_ppm=int(FREQ_CORR_PPM),
             device_args=BACKEND_ARGS,
-            **extra_kwargs,  # ← только для file
+            on_fail="file_wait",
+            **extra_kwargs,  # if_offset для file
         )
-        # --- State ---
 
-        #self.sample_rate = float(getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
-        #print(f" Backends Sample Rate: {self.sample_rate:.2f} Sa/s")
-        
-        # Печать полного статуса бэкенда в консоль
-        try:
-            print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
-        except Exception:
+        # Реальный Fs (если backend есть); иначе — временно берём константу
+        self.sample_rate = float(SAMPLE_RATE_SPS)
+        if self.backend is not None:
             try:
-                print("\n=== BACKEND STATUS ===\n", self.backend.get_status(), "\n======================\n")
+                print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
             except Exception:
-                pass
-
-        # Реальный Fs берём из статуса/атрибутов бэкенда
-        _st = {}
-        try:
-            _st = self.backend.get_status() or {}
-        except Exception:
-            _st = {}
-        self.sample_rate = float(
-            _st.get("actual_sample_rate_sps",
+                try:
+                    print("\n=== BACKEND STATUS ===\n", self.backend.get_status(), "\n======================\n")
+                except Exception:
+                    pass
+            try:
+                st = self.backend.get_status() or {}
+            except Exception:
+                st = {}
+            self.sample_rate = float(
+                st.get("actual_sample_rate_sps",
                     getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
-        )
-        print(f" Backends Sample Rate: {self.sample_rate:.2f} Sa/s")
+            )
+            print(f" Backends Sample Rate: {self.sample_rate:.2f} Sa/s")
         
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
         self.tail_p = np.empty(0, dtype=np.float32)
@@ -297,7 +296,7 @@ class SoapySlidingRMS:
     # ---- Message decoder window ----
     def _on_show_message(self, _event):
         """Показывает декодированное сообщение EPIRB/ELT в отдельном окне."""
-        import matplotlib.pyplot as _plt
+        
         hex_msg = getattr(self, "last_msg_hex", None)
 
         if not hex_msg or hex_msg == "None":
@@ -393,7 +392,7 @@ class SoapySlidingRMS:
 
     # ---- Params window (snapshot, table) ----
     def _on_show_params(self, _event):
-        import matplotlib.pyplot as _plt
+        
         m = getattr(self, "last_phase_metrics", None)
         hex_msg = getattr(self, "last_msg_hex", None)
 
@@ -472,10 +471,17 @@ class SoapySlidingRMS:
         _plt.show(block=False)
         _plt.pause(0.1)
 
-
-
     def _on_show_sdr_status(self, _event):
-        import matplotlib.pyplot as plt
+
+        if self.backend is None:
+            fig, ax = plt.subplots(figsize=(6, 2))
+            try: fig.canvas.manager.set_window_title("SDR Status")
+            except Exception: pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, "Backend не создан.\nНажмите «Открыть» и выберите файл.", ha='center', va='center')
+            plt.tight_layout(); plt.show(block=False); plt.pause(0.1)
+            return
+
         try:
             st = self.backend.get_status()
         except Exception:
@@ -646,10 +652,10 @@ class SoapySlidingRMS:
 
         # Создаём новый backend
         try:
-            from lib.backends import make_backend
+
             extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (backend_name == "file") else {}
 
-            self.backend = make_backend(
+            self.backend = safe_make_backend(
                 backend_name,
                 sample_rate=SAMPLE_RATE_SPS,
                 center_freq=float(CENTER_FREQ_HZ),
@@ -657,8 +663,38 @@ class SoapySlidingRMS:
                 agc=bool(ENABLE_AGC),
                 corr_ppm=int(FREQ_CORR_PPM),
                 device_args=device_args,
+                on_fail="file_wait",
                 **extra_kwargs,
             )
+
+            # Обновляем Fs/статус если backend есть
+            if self.backend is not None:
+                try:
+                    _st = self.backend.get_status() or {}
+                    self.sample_rate = float(
+                        _st.get("actual_sample_rate_sps",
+                                getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
+                    )
+                    print(f"[INFO] Backend {backend_name} активирован. Sample Rate: {self.sample_rate:.2f} Sa/s")
+                    print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+                except Exception:
+                    pass
+            else:
+                print("[INFO] SDR не найден — режим ожидания файла (нажмите «Открыть»).")
+
+            # … далее обнуление состояния как было …
+
+            # Перезапускаем поток чтения ТОЛЬКО если backend есть
+            if hasattr(self, 'reader_thread'):
+                try: self.reader_thread.join(timeout=0.5)
+                except Exception: pass
+
+            if self.backend is not None:
+                self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                self.reader_thread.start()
+
+            # Обновляем подсветку кнопок
+            self._update_backend_buttons(backend_name)
 
             # Обновляем параметры
             try:
@@ -737,8 +773,9 @@ class SoapySlidingRMS:
     def _restore_original_backend(self):
         """Восстанавливает исходный backend при ошибке."""
         try:
+
             extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
-            self.backend = make_backend(
+            self.backend = safe_make_backend(
                 BACKEND_NAME,
                 sample_rate=SAMPLE_RATE_SPS,
                 center_freq=float(CENTER_FREQ_HZ),
@@ -746,8 +783,21 @@ class SoapySlidingRMS:
                 agc=bool(ENABLE_AGC),
                 corr_ppm=int(FREQ_CORR_PPM),
                 device_args=BACKEND_ARGS,
+                on_fail="file_wait",
                 **extra_kwargs,
             )
+            # если backend None — просто не запускаем поток
+            if self.backend is not None:
+                _st = self.backend.get_status() or {}
+                self.sample_rate = float(
+                    _st.get("actual_sample_rate_sps",
+                            getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
+                )
+                self._stop = False
+                self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                self.reader_thread.start()
+
+
             _st = self.backend.get_status() or {}
             self.sample_rate = float(
                 _st.get("actual_sample_rate_sps",
@@ -794,7 +844,7 @@ class SoapySlidingRMS:
 
         # Пересоздаём backend с новым файлом
         try:
-            from lib.backends import make_backend
+
             extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ}
 
             self.backend = make_backend(
@@ -1547,22 +1597,21 @@ class SoapySlidingRMS:
 
     # ---------- Run/Stop ----------
     def run(self):
-        self.ani = FuncAnimation(
-            self.fig1,
-            self._update_all_plots_combined,
-            interval=120,
-            blit=False,
-            cache_frame_data=False
-        )
 
-        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader_thread.start()
+        self.ani = FuncAnimation(self.fig1, self._update_all_plots_combined,
+                                interval=120, blit=False, cache_frame_data=False)
+
+        # --- запуск только если backend уже есть ---
+        if self.backend is not None:
+            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
 
         try:
             plt.show()
         finally:
             self.stop()
-            self.reader_thread.join()
+            if hasattr(self, "reader_thread"):
+                self.reader_thread.join()
 
     def stop(self):
         if not self._stop:

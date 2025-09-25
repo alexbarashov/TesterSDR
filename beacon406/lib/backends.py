@@ -126,7 +126,8 @@ class SoapyBackend(SDRBackend):
     def __init__(self, device_args: Dict[str, Any], **kw):
         super().__init__(**kw)
         try:
-            #_ensure_soapy_env_on_windows()
+            # lazy import: optional dependency (SoapySDR подключаем только при создании Soapy-бэкенда)
+            # _ensure_soapy_env_on_windows()  # оставим закомментированным, чтобы не менять текущее поведение
             import SoapySDR  # type: ignore
             from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32  # type: ignore
         except Exception as e:
@@ -158,15 +159,6 @@ class SoapyBackend(SDRBackend):
                 self.device_info = f"{drv_key} device"
         except Exception:
             self.device_info = f"{drv_key} device"
-
-        # --- HW sample rate по умолчанию для каждого SDR ---
-        SDR_DEFAULT_HW_SR = {
-            "rtlsdr": 1_024_000.0,
-            "hackrf": 2_000_000.0,
-            "sdrplay": 2_000_000.0,
-            "airspy": 3_000_000.0,
-
-        }
 
         fs_req = self.sample_rate_sps       # то, что запросил код (обычно 1e6)
         fs_hw = SDR_DEFAULT_HW_SR.get(drv_key, fs_req)
@@ -426,7 +418,7 @@ class FilePlaybackBackend(SDRBackend):
         # Формируем удобочитаемую информацию о файле
         file_path = getattr(self, "_path", None)
         if file_path:
-            import os
+            
             filename = os.path.basename(file_path)
             device_info = f"File: {filename}"
         else:
@@ -477,6 +469,69 @@ class FilePlaybackBackend(SDRBackend):
         # позволяет «перезапустить» файл вручную при повторном запуске графика
         self._pos = 0
         self._eof = False
+
+# --- NEW: safe_make_backend -----------------------------------------------
+def safe_make_backend(
+    name: str,
+    *,
+    on_fail: str = "raise",          # "raise" | "file_wait" | "none"
+    fallback_args: dict | None = None,
+    **kwargs,
+):
+    """
+    Безопасный конструктор backend’ов.
+    - on_fail="raise": поведение как у make_backend (по умолчанию).
+    - on_fail="file_wait": при отсутствии SDR вернёт file-backend с пустым путём (ожидание выбора файла в UI).
+    - on_fail="none": при ошибке вернёт None.
+
+    Параметры kwargs пробрасываются в make_backend(...). Для file-backend
+    из kwargs используются sample_rate и опционально if_offset_hz.
+    """
+    try:
+        return make_backend(name, **kwargs)
+
+    except RuntimeError as e:
+        msg = str(e).lower()
+        devices_not_found = ("устройства не найдены" in msg) or ("devices not found" in msg)
+
+        if not devices_not_found:
+            # другие ошибки не глотаем
+            if on_fail == "raise":
+                raise
+            elif on_fail == "none":
+                return None
+            elif on_fail == "file_wait":
+                # даже если ошибка не «нет устройств», пробуем мягкий фолбэк
+                pass
+
+        if on_fail == "raise":
+            raise
+
+        if on_fail == "none":
+            return None
+
+        if on_fail == "file_wait":
+            fb_args = {"path": ""}
+            if fallback_args:
+                fb_args.update(fallback_args)
+
+            fb_kwargs = {}
+            if "sample_rate" in kwargs:
+                fb_kwargs["sample_rate"] = kwargs["sample_rate"]
+            if "corr_ppm" in kwargs:
+                fb_kwargs["corr_ppm"] = kwargs["corr_ppm"]
+            if "if_offset_hz" in kwargs:
+                fb_kwargs["if_offset_hz"] = kwargs["if_offset_hz"]
+
+            try:
+                return make_backend("file", device_args=fb_args, **fb_kwargs)
+            except Exception:
+                # Путь пустой или file-backend не готов — тихо уходим в режим ожидания
+                return None
+
+        # На всякий случай (неизвестный on_fail) — ведём себя как raise
+        raise
+# --- END NEW --------------------------------------------------------------
 
 def make_backend(name: str,
                  *,
@@ -539,7 +594,7 @@ def make_backend(name: str,
                         or device_args.get("file")
                         or device_args.get("uri"))
         if not path:
-            import os
+            
             path = os.getenv("IQ_FILE_PATH")
 
         if not path:
@@ -591,7 +646,7 @@ def autodetect_soapy_driver() -> str:
     Можно переопределить порядок Soapy через BACKEND_PREFERRED_ORDER,
     например: "rtl,hackrf,airspy,sdrplay".
     """
-    import os, subprocess, shlex
+    import os, subprocess, shlex # lazy imports: используются только в автодетекте
 
     # --- 1) Попытаться найти через SoapySDR ---
     try:
@@ -664,7 +719,7 @@ def autodetect_soapy_driver() -> str:
     # dll_path можно переопределить через переменную окружения RSA_API_DLL
     dll_path = os.getenv("RSA_API_DLL", r"C:/Tektronix/RSA_API/lib/x64/RSA_API.dll")
     try:
-        import ctypes as ct
+        
         if os.path.exists(dll_path):
             L = ct.CDLL(dll_path)
             # DEVICE_SearchIntW: int *numDevs, int **ids, wchar_t **sn, wchar_t **type
@@ -763,7 +818,7 @@ class RSA_API_Wrapper:
     def iqstream_stop(self):  self.lib.IQSTREAM_Stop()
 
     def iqstream_get_block(self, buf_pairs: int):
-        import numpy as np
+        
         n = ct.c_int(0)
         buf = (ct.c_float * (2 * buf_pairs))()
         st = self.lib.IQSTREAM_GetIQData(ct.cast(buf, ct.c_void_p), ct.byref(n), None)
@@ -847,7 +902,7 @@ class TekRSABackend(SDRBackend):
         self._thread.start()
 
     def read(self, nsamps: int):
-        import numpy as np
+        
         if nsamps <= 0:
             return np.empty(0, dtype=np.complex64)
         with self._lock:
