@@ -12,6 +12,9 @@ import random
 import time
 import sys
 import os
+import threading
+import queue
+from collections import deque
 from dataclasses import dataclass, field
 from typing import List
 from flask import Flask, jsonify, request, Response
@@ -33,6 +36,47 @@ app = Flask(__name__)
 sdr_backend = None
 sdr_device_info = "No SDR detected"
 
+# Глобальные переменные для real-time обработки
+sdr_running = False
+reader_thread = None
+data_lock = threading.Lock()
+pulse_queue = queue.Queue()
+current_rms_dbm = -100.0  # Текущее значение RMS в dBm
+last_pulse_data = None    # Данные о последнем импульсе
+
+# Параметры обработки сигналов (из beacon406-plot.py)
+TARGET_SIGNAL_HZ = 406_037_000
+IF_OFFSET_HZ = -37_000
+CENTER_FREQ_HZ = TARGET_SIGNAL_HZ + IF_OFFSET_HZ
+SAMPLE_RATE_SPS = 1_000_000
+BB_SHIFT_ENABLE = True
+BB_SHIFT_HZ = IF_OFFSET_HZ
+RMS_WIN_MS = 1.0
+DBM_OFFSET_DB = -30.0
+PULSE_THRESH_DBM = -45.0
+READ_CHUNK = 65536
+EPS = 1e-20
+
+# Буферы для обработки данных
+sample_counter = 0
+win_samps = int(RMS_WIN_MS * 1e-3 * SAMPLE_RATE_SPS)
+nco_phase = 0.0
+nco_k = 2.0 * np.pi * BB_SHIFT_HZ / SAMPLE_RATE_SPS
+tail_p = np.array([], dtype=np.float32)
+full_rms = np.array([], dtype=np.float32)
+full_idx = np.array([], dtype=np.int64)
+rms_history = deque(maxlen=1000)  # Для веб-отображения
+time_history = deque(maxlen=1000)
+
+# Состояние детекции импульсов
+in_pulse = False
+pulse_start_abs = 0
+last_pulse_data = None
+
+def db10(x: np.ndarray) -> np.ndarray:
+    """dB calculation helper"""
+    return 10.0 * np.log10(np.maximum(x, EPS))
+
 def init_sdr_backend():
     """Инициализация SDR backend"""
     global sdr_backend, sdr_device_info
@@ -45,12 +89,6 @@ def init_sdr_backend():
 
     try:
         print(f"[SDR] Initializing backend: {BACKEND_NAME}")
-
-        # Параметры SDR (аналогично beacon406-plot.py)
-        TARGET_SIGNAL_HZ = 406_037_000
-        IF_OFFSET_HZ = -37_000
-        CENTER_FREQ_HZ = TARGET_SIGNAL_HZ + IF_OFFSET_HZ
-        SAMPLE_RATE_SPS = 1_000_000
 
         extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
 
@@ -95,6 +133,205 @@ def init_sdr_backend():
 
         print(f"[SDR] Initialization failed (non-critical)")
         return False
+
+def start_sdr_capture():
+    """Запуск захвата SDR данных в реальном времени"""
+    global sdr_running, reader_thread
+
+    if not sdr_backend:
+        print("[SDR] Backend not initialized, cannot start capture")
+        return False
+
+    if sdr_running:
+        print("[SDR] Capture already running")
+        return True
+
+    sdr_running = True
+    reader_thread = threading.Thread(target=sdr_reader_loop, daemon=True)
+    reader_thread.start()
+    print("[SDR] Real-time capture started")
+    return True
+
+def stop_sdr_capture():
+    """Остановка захвата SDR данных"""
+    global sdr_running
+    sdr_running = False
+    print("[SDR] Real-time capture stopped")
+
+def sdr_reader_loop():
+    """Основной цикл чтения и обработки SDR данных"""
+    global sample_counter, nco_phase, tail_p, full_rms, full_idx, in_pulse, pulse_start_abs, sdr_running
+
+    print("[SDR] Reader loop starting...")
+    error_count = 0
+    max_errors = 10
+
+    try:
+        while sdr_running:
+            try:
+                # Читаем блок данных
+                samples = sdr_backend.read(READ_CHUNK)
+                if samples.size == 0:
+                    if BACKEND_NAME == "file":
+                        print("[SDR] EOF reached in file mode - stopping")
+                        break
+                    else:
+                        print("[SDR] No samples received, retrying...")
+                        time.sleep(0.1)
+                        continue
+
+                # Обрабатываем блок
+                process_samples_realtime(samples)
+                error_count = 0  # Сбрасываем счетчик ошибок при успешном чтении
+
+            except Exception as e:
+                error_count += 1
+                print(f"[SDR] Read error #{error_count}: {e}")
+
+                if error_count >= max_errors:
+                    print(f"[SDR] Too many errors ({error_count}), stopping capture")
+                    break
+
+                time.sleep(0.1)  # Увеличиваем паузу при ошибках
+                continue
+
+    except Exception as e:
+        print(f"[SDR] Critical reader loop error: {e}")
+    finally:
+        print("[SDR] Reader loop exiting...")
+        # НЕ вызываем stop_sdr_capture() здесь чтобы избежать рекурсии
+        sdr_running = False
+
+def process_samples_realtime(samples: np.ndarray):
+    """Обработка блока SDR данных в реальном времени"""
+    global sample_counter, nco_phase, tail_p, full_rms, full_idx, in_pulse, pulse_start_abs
+
+    now = time.time()
+    base_idx = sample_counter
+    x = samples.copy()
+
+    # Baseband shift (если включен)
+    if BB_SHIFT_ENABLE and abs(BB_SHIFT_HZ) > 0:
+        n = np.arange(samples.size, dtype=np.float64)
+        mixer = np.exp(1j * (nco_phase + nco_k * n)).astype(np.complex64)
+        x *= mixer
+        nco_phase = float((nco_phase + nco_k * samples.size) % (2.0 * np.pi))
+
+    # Вычисление мощности
+    p_block = (np.abs(x) ** 2)
+
+    # Объединяем с хвостом предыдущего блока
+    if tail_p.size:
+        p_cont = np.concatenate((tail_p, p_block))
+        p_cont_start_idx = base_idx - tail_p.size
+    else:
+        p_cont = p_block
+        p_cont_start_idx = base_idx
+
+    # RMS анализ
+    if p_cont.size >= win_samps:
+        c = np.cumsum(p_cont, dtype=np.float64)
+        S_valid = c[win_samps - 1:] - np.concatenate(([0.0], c[:-win_samps]))
+        P_win = S_valid / float(win_samps)
+
+        # Калибровка dBm
+        if sdr_backend:
+            rms_dbm_vec = db10(P_win) + DBM_OFFSET_DB + sdr_backend.get_calib_offset_db()
+        else:
+            rms_dbm_vec = db10(P_win) + DBM_OFFSET_DB
+
+        idx_end = p_cont_start_idx + (win_samps - 1) + np.arange(rms_dbm_vec.size, dtype=np.int64)
+
+        # Обновляем буферы RMS
+        with data_lock:
+            global current_rms_dbm
+            # Добавляем данные в истории для веб-отображения
+            for i, rms_val in enumerate(rms_dbm_vec):
+                time_history.append(now + i * 1e-6)  # Примерное время
+                rms_history.append(float(rms_val))
+                # Обновляем текущее значение RMS
+                current_rms_dbm = float(rms_val)
+
+        # Детекция импульсов
+        detect_pulses(rms_dbm_vec, idx_end, x, p_cont_start_idx)
+
+        # Сохраняем хвост для следующего блока
+        if p_cont.size > win_samps:
+            tail_p = p_cont[-(p_cont.size - win_samps):]
+        else:
+            tail_p = np.array([], dtype=np.float32)
+    else:
+        tail_p = p_cont
+
+    sample_counter += samples.size
+
+def detect_pulses(rms_dbm_vec, idx_end, iq_data, start_idx):
+    """Детекция импульсов по RMS порогу"""
+    global in_pulse, pulse_start_abs, last_pulse_data
+
+    # Поиск превышений порога
+    on = rms_dbm_vec >= PULSE_THRESH_DBM
+    trans = np.diff(on.astype(np.int8), prepend=on[0])
+    start_pos = np.where(trans == 1)[0]
+    end_pos = np.where(trans == -1)[0] - 1
+
+    # Обработка начала импульса
+    for start_idx_local in start_pos:
+        if not in_pulse:
+            in_pulse = True
+            pulse_start_abs = idx_end[start_idx_local]
+            print(f"[PULSE] Started at sample {pulse_start_abs}")
+
+    # Обработка конца импульса
+    for end_idx_local in end_pos:
+        if in_pulse:
+            pulse_end_abs = idx_end[end_idx_local]
+            pulse_len_samples = pulse_end_abs - pulse_start_abs + 1
+            pulse_len_ms = pulse_len_samples / SAMPLE_RATE_SPS * 1000
+
+            print(f"[PULSE] Ended at sample {pulse_end_abs}, length: {pulse_len_ms:.1f}ms")
+
+            # Если импульс достаточно длинный, пытаемся демодулировать
+            if pulse_len_ms >= 400:  # Минимальная длина для PSK406 маяка
+                try:
+                    # Извлекаем сегмент IQ данных для импульса
+                    # (Здесь нужна более сложная логика для извлечения правильного сегмента)
+                    process_pulse_segment(pulse_start_abs, pulse_end_abs, iq_data)
+                except Exception as e:
+                    print(f"[PULSE] Processing error: {e}")
+
+            in_pulse = False
+
+def process_pulse_segment(start_abs, end_abs, iq_segment):
+    """Обработка сегмента импульса для PSK демодуляции"""
+    global last_pulse_data
+
+    try:
+        # Здесь будет PSK демодуляция
+        # Пока что просто сохраняем информацию о импульсе
+        pulse_info = {
+            'start_sample': int(start_abs),
+            'end_sample': int(end_abs),
+            'length_ms': float((end_abs - start_abs) / SAMPLE_RATE_SPS * 1000),
+            'timestamp': time.time()
+        }
+
+        # Добавляем в очередь для обработки веб-интерфейсом
+        try:
+            pulse_queue.put_nowait(pulse_info)
+        except queue.Full:
+            # Если очередь переполнена, пропускаем старые данные
+            try:
+                pulse_queue.get_nowait()
+                pulse_queue.put_nowait(pulse_info)
+            except queue.Empty:
+                pass
+
+        last_pulse_data = pulse_info
+        print(f"[PULSE] Processed: {pulse_info['length_ms']:.1f}ms")
+
+    except Exception as e:
+        print(f"[PULSE] Segment processing error: {e}")
 
 def _find_pulse_segment(iq_data, sample_rate, thresh_dbm, win_ms, start_delay_ms, calib_db):
     """
@@ -1762,7 +1999,27 @@ HTML_PAGE = """
         }
 
         function updateStats(data) {
+            // Добавляем real-time данные в статистику
+            let realtimeSection = '';
+            if (data.sdr_capture_active) {
+                const pulseInfo = data.latest_pulse ?
+                    `Last pulse: ${data.latest_pulse.length_ms.toFixed(1)}ms` :
+                    'No pulses detected';
+
+                realtimeSection = `
+                    <div class="stat-row" style="background-color: #e8f5e8;"><span class="stat-label">SDR Real-time:</span><span class="stat-value">Active</span></div>
+                    <div class="stat-row"><span class="stat-label">RMS Live, dBm</span><span class="stat-value">${data.realtime_rms_dbm.toFixed(1)}</span></div>
+                    <div class="stat-row"><span class="stat-label">Pulses Found</span><span class="stat-value">${data.realtime_pulse_count}</span></div>
+                    <div class="stat-row"><span class="stat-label">Pulse Info</span><span class="stat-value" title="${pulseInfo}">${pulseInfo.length > 20 ? pulseInfo.substring(0, 17) + '...' : pulseInfo}</span></div>
+                `;
+            } else if (data.running) {
+                realtimeSection = `
+                    <div class="stat-row" style="background-color: #ffe8e8;"><span class="stat-label">SDR Real-time:</span><span class="stat-value">Starting...</span></div>
+                `;
+            }
+
             const statsHtml = `
+                ${realtimeSection}
                 <div class="stat-row"><span class="stat-label">FS1,Hz</span><span class="stat-value">${data.fs1_hz.toFixed(3)}</span></div>
                 <div class="stat-row"><span class="stat-label">FS2,Hz</span><span class="stat-value">${data.fs2_hz.toFixed(3)}</span></div>
                 <div class="stat-row"><span class="stat-label">FS3,Hz</span><span class="stat-value">${data.fs3_hz.toFixed(3)}</span></div>
@@ -2917,6 +3174,30 @@ def api_status():
         except Exception:
             sdr_status = {}
 
+    # Получаем real-time данные от RMS анализа
+    realtime_rms = 0.0
+    realtime_pulse_count = 0
+    latest_pulse_info = None
+
+    if sdr_running:
+        # Получаем текущее RMS значение (без блокировки для упрощения)
+        try:
+            realtime_rms = current_rms_dbm
+        except NameError:
+            realtime_rms = -100.0  # Значение по умолчанию если переменная не определена
+
+        # Считаем количество импульсов в очереди
+        realtime_pulse_count = pulse_queue.qsize()
+
+        # Получаем информацию о последнем импульсе
+        try:
+            # Копируем очередь чтобы получить последний элемент без удаления
+            temp_queue = list(pulse_queue.queue)
+            if temp_queue:
+                latest_pulse_info = temp_queue[-1]
+        except:
+            pass
+
     return jsonify({
         'running': STATE.running,
         'protocol': STATE.protocol,
@@ -2948,7 +3229,11 @@ def api_status():
         'fm_data': STATE.fm_data,
         'fm_xs_ms': STATE.fm_xs_ms,
         'sdr_device_info': sdr_device_info,  # Информация об устройстве SDR
-        'sdr_status': sdr_status  # Дополнительный статус SDR
+        'sdr_status': sdr_status,  # Дополнительный статус SDR
+        'realtime_rms_dbm': realtime_rms,  # Real-time RMS данные
+        'realtime_pulse_count': realtime_pulse_count,  # Количество обнаруженных импульсов
+        'latest_pulse': latest_pulse_info,  # Информация о последнем импульсе
+        'sdr_capture_active': sdr_running  # Статус захвата SDR
     })
 
 @app.route('/api/measure', methods=['POST'])
@@ -2975,8 +3260,36 @@ def api_measure():
 
 @app.route('/api/run', methods=['POST'])
 def api_run():
-    STATE.running = True
-    return jsonify({'status': 'running', 'running': STATE.running})
+    try:
+        # Останавливаем предыдущий захват, если был запущен
+        stop_sdr_capture()
+        time.sleep(0.1)  # Небольшая пауза для корректного завершения
+
+        # Запускаем новый захват
+        if start_sdr_capture():
+            STATE.running = True
+            return jsonify({
+                'status': 'running',
+                'running': STATE.running,
+                'message': 'Real-time SDR capture started'
+            })
+        else:
+            STATE.running = False
+            return jsonify({
+                'status': 'error',
+                'running': STATE.running,
+                'message': 'Failed to start SDR capture'
+            }), 500
+    except Exception as e:
+        STATE.running = False
+        # Фильтруем русские символы для избежания проблем с кодировкой
+        error_msg = ''.join(c if ord(c) < 128 else '?' for c in str(e))
+        print(f"[RUN] Error: {error_msg}")
+        return jsonify({
+            'status': 'error',
+            'running': STATE.running,
+            'message': f'Error starting capture: {error_msg}'
+        }), 500
 
 @app.route('/api/cont', methods=['POST'])
 def api_cont():
@@ -2985,8 +3298,14 @@ def api_cont():
 
 @app.route('/api/break', methods=['POST'])
 def api_break():
+    # Останавливаем SDR захват
+    stop_sdr_capture()
     STATE.running = False
-    return jsonify({'status': 'stopped', 'running': STATE.running})
+    return jsonify({
+        'status': 'stopped',
+        'running': STATE.running,
+        'message': 'SDR capture stopped'
+    })
 
 @app.route('/api/load', methods=['POST'])
 def api_load():
