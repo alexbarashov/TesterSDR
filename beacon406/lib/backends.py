@@ -141,6 +141,24 @@ class SoapyBackend(SDRBackend):
         drv_key = str(self.dev.getDriverKey()).lower()
         self._drv_key = drv_key  # COMBAT: сохраняем ключ драйвера для внутренней логики
 
+        # Получаем информацию об устройстве
+        try:
+            hw_info = self.dev.getHardwareInfo()
+            if hw_info:
+                # Извлекаем основную информацию
+                parts = []
+                if 'product' in hw_info:
+                    parts.append(hw_info['product'])
+                if 'serial' in hw_info:
+                    parts.append(f"S/N:{hw_info['serial']}")
+                if 'tuner' in hw_info:
+                    parts.append(f"tuner:{hw_info['tuner']}")
+                self.device_info = ' '.join(parts) if parts else f"{drv_key} device"
+            else:
+                self.device_info = f"{drv_key} device"
+        except Exception:
+            self.device_info = f"{drv_key} device"
+
         # --- HW sample rate по умолчанию для каждого SDR ---
         SDR_DEFAULT_HW_SR = {
             "rtlsdr": 1_024_000.0,
@@ -317,6 +335,7 @@ class SoapyBackend(SDRBackend):
         # Ключ драйвера (rtl, hackrf, airspy, sdrplay и т.п.)
         s.update({
             "driver": getattr(self, "_drv_key", None),
+            "device_info": getattr(self, "device_info", None),
             "hw_sample_rate_sps": float(getattr(self, "sample_rate_hw", getattr(self, "sample_rate_sps", 0.0))),
             "decim": int(getattr(self, "decim", 1)),
         })
@@ -404,9 +423,19 @@ class FilePlaybackBackend(SDRBackend):
 
     def get_status(self) -> Dict[str, Any]:
         s = super().get_status()
+        # Формируем удобочитаемую информацию о файле
+        file_path = getattr(self, "_path", None)
+        if file_path:
+            import os
+            filename = os.path.basename(file_path)
+            device_info = f"File: {filename}"
+        else:
+            device_info = "File playback"
+
         s.update({
             "driver": "file",
-            "file_path": getattr(self, "_path", None),
+            "device_info": device_info,
+            "file_path": file_path,
             "if_offset_hz": float(getattr(self, "_if_offset_hz", 0.0)),
             "mix_shift_hz": float(getattr(self, "_mix_shift_hz", 0.0)),
             "eof": bool(getattr(self, "_eof", False)),

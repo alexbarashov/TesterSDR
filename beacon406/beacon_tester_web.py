@@ -22,10 +22,79 @@ from lib.hex_decoder import hex_to_bits, build_table_rows
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.processing_fm import fm_discriminator
+from lib.backends import make_backend  # SDR backend support
+from lib.config import BACKEND_NAME, BACKEND_ARGS
 import numpy as np
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+
+# Глобальные переменные для SDR
+sdr_backend = None
+sdr_device_info = "No SDR detected"
+
+def init_sdr_backend():
+    """Инициализация SDR backend"""
+    global sdr_backend, sdr_device_info
+
+    # Если backend не настроен или auto, пробуем инициализацию
+    if BACKEND_NAME == "none" or not BACKEND_NAME:
+        sdr_device_info = "SDR disabled (config: none)"
+        print(f"[SDR] {sdr_device_info}")
+        return False
+
+    try:
+        print(f"[SDR] Initializing backend: {BACKEND_NAME}")
+
+        # Параметры SDR (аналогично beacon406-plot.py)
+        TARGET_SIGNAL_HZ = 406_037_000
+        IF_OFFSET_HZ = -37_000
+        CENTER_FREQ_HZ = TARGET_SIGNAL_HZ + IF_OFFSET_HZ
+        SAMPLE_RATE_SPS = 1_000_000
+
+        extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
+
+        sdr_backend = make_backend(
+            BACKEND_NAME,
+            sample_rate=SAMPLE_RATE_SPS,
+            center_freq=float(CENTER_FREQ_HZ),
+            gain_db=30.0,
+            agc=False,
+            corr_ppm=0,
+            device_args=BACKEND_ARGS,
+            **extra_kwargs,
+        )
+
+        # Получаем информацию об устройстве
+        try:
+            status = sdr_backend.get_status()
+            device_info = status.get('device_info', 'Unknown device')
+            driver = status.get('driver', BACKEND_NAME)
+            sdr_device_info = f"{driver}: {device_info}"
+            print(f"[SDR] Detected: {sdr_device_info}")
+        except Exception:
+            sdr_device_info = f"{BACKEND_NAME} device"
+
+        return True
+    except Exception as e:
+        # Обработка ошибки без проблем с кодировкой
+        try:
+            error_msg = str(e)
+        except:
+            error_msg = "Unknown error"
+
+        # Определяем тип ошибки и формируем понятное сообщение
+        if "not found" in error_msg.lower() or "no device" in error_msg.lower():
+            sdr_device_info = f"No SDR devices found ({BACKEND_NAME})"
+        elif BACKEND_NAME == "file" and BACKEND_ARGS:
+            sdr_device_info = f"File mode: {BACKEND_ARGS[-30:]}"
+        else:
+            # Убираем русские символы из сообщения об ошибке
+            clean_msg = ''.join(c if ord(c) < 128 else '?' for c in error_msg)
+            sdr_device_info = f"SDR init failed: {clean_msg[:35]}"
+
+        print(f"[SDR] Initialization failed (non-critical)")
+        return False
 
 def _find_pulse_segment(iq_data, sample_rate, thresh_dbm, win_ms, start_delay_ms, calib_db):
     """
@@ -850,6 +919,15 @@ HTML_PAGE = """
                     <button class="button primary" onclick="runTest()">Run</button>
                     <button class="button" onclick="contTest()">Cont</button>
                     <button class="button danger" onclick="breakTest()">Break</button>
+                    <div style="margin-top: 10px;">
+                        <div style="font-size: 12px; color: #6c757d; margin-bottom: 4px;">SDR Status:</div>
+                        <div id="sdrStatus" style="font-family: 'Courier New', monospace; font-size: 11px;
+                                                   background: #f8f9fa; border: 1px solid #dee2e6;
+                                                   border-radius: 3px; padding: 4px 6px; min-height: 20px;
+                                                   color: #495057; word-break: break-all;">
+                            No SDR detected
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1929,6 +2007,11 @@ HTML_PAGE = """
                 document.getElementById('message').textContent = data.message;
             }
 
+            // Обновление статуса SDR
+            if (data.sdr_device_info) {
+                document.getElementById('sdrStatus').textContent = data.sdr_device_info;
+            }
+
             // Обновление фазовых значений (только если элементы существуют)
             const phasePlusElem = document.getElementById('phasePlus');
             const phaseMinusElem = document.getElementById('phaseMinus');
@@ -2700,7 +2783,18 @@ HTML_PAGE = """
 
         // Функции кнопок
         async function measure() {
-            await fetch('/api/measure', { method: 'POST' });
+            // Показываем статус инициализации
+            document.getElementById('sdrStatus').textContent = 'Initializing SDR...';
+
+            const response = await fetch('/api/measure', { method: 'POST' });
+            const data = await response.json();
+
+            // Обновляем статус SDR после инициализации
+            if (data.sdr_device_info) {
+                document.getElementById('sdrStatus').textContent = data.sdr_device_info;
+            }
+
+            console.log('Measure triggered, SDR status:', data.sdr_device_info);
         }
 
         async function runTest() {
@@ -2815,6 +2909,14 @@ def api_status():
     if len(STATE.xs_fm_ms) > 0:
         print(f"API STATUS DEBUG: xs_fm_ms sample = {STATE.xs_fm_ms[:5]}")
 
+    # Получаем информацию о статусе SDR
+    sdr_status = {}
+    if sdr_backend:
+        try:
+            sdr_status = sdr_backend.get_status() or {}
+        except Exception:
+            sdr_status = {}
+
     return jsonify({
         'running': STATE.running,
         'protocol': STATE.protocol,
@@ -2844,12 +2946,32 @@ def api_status():
         'phase_data': STATE.phase_data,
         'xs_fm_ms': STATE.xs_fm_ms,
         'fm_data': STATE.fm_data,
-        'fm_xs_ms': STATE.fm_xs_ms
+        'fm_xs_ms': STATE.fm_xs_ms,
+        'sdr_device_info': sdr_device_info,  # Информация об устройстве SDR
+        'sdr_status': sdr_status  # Дополнительный статус SDR
     })
 
 @app.route('/api/measure', methods=['POST'])
 def api_measure():
-    return jsonify({'status': 'measure triggered'})
+    global sdr_backend, sdr_device_info
+
+    # Инициализируем SDR если еще не инициализирован
+    if not sdr_backend:
+        print("[Measure] Initializing SDR backend...")
+        success = init_sdr_backend()
+        if success:
+            print(f"[Measure] SDR initialized: {sdr_device_info}")
+        else:
+            print(f"[Measure] SDR initialization failed: {sdr_device_info}")
+    else:
+        print(f"[Measure] SDR already initialized: {sdr_device_info}")
+
+    # Возвращаем статус с информацией о SDR
+    return jsonify({
+        'status': 'measure triggered',
+        'sdr_initialized': sdr_backend is not None,
+        'sdr_device_info': sdr_device_info
+    })
 
 @app.route('/api/run', methods=['POST'])
 def api_run():
@@ -2987,5 +3109,6 @@ def api_upload():
 if __name__ == '__main__':
     print(">>> Starting COSPAS/SARSAT Beacon Tester v2.1")
     print(">>> Interface available at: http://127.0.0.1:8738/")
+    print(">>> SDR will be initialized on Measure button press")
     print(">>> To stop: Ctrl+C")
     app.run(host='127.0.0.1', port=8738, debug=True)
