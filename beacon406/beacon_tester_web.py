@@ -168,9 +168,9 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         'bitrate_bps': None,
         'pos_phase': None,
         'neg_phase': None,
-        'ph_rise_us': None,
-        'ph_fall_us': None,
-        'asymmetry_pct': None,
+        'ph_rise': None,
+        'ph_fall': None,
+        'symmetry_pct': None,
         'msg_hex': None,
         'msg_ok': None
     }
@@ -181,12 +181,29 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
 
         pulse_len_ms = len(iq_seg) / fs * 1000
 
-        # Используем полный сегмент как в FILE - БЕЗ дополнительного обрезания
-        print(f"[PSK] Processing full segment: {len(iq_seg)} samples, {pulse_len_ms:.1f}ms")
+        # ИСПРАВЛЕНИЕ: Применяем _find_pulse_segment для правильной обрезки преамбулы
+        thresh_dbm = -60.0  # порог как в FILE
+        win_ms = 1.0  # окно RMS как в FILE  
+        start_delay_ms = 3.0  # обрезание начала как в FILE
+        calib_db = -30.0  # калибровка как в FILE
+        
+        # Применяем _find_pulse_segment для обрезки преамбулы
+        iq_seg_trimmed = _find_pulse_segment(iq_seg, fs, thresh_dbm, win_ms, start_delay_ms, calib_db)
+        
+        if iq_seg_trimmed is not None and len(iq_seg_trimmed) > 0:
+            iq_seg = iq_seg_trimmed  
+            print(f"[PSK-RUN] _find_pulse_segment success: {len(iq_seg)} samples")
+        else:
+            print(f"[PSK-RUN] _find_pulse_segment failed, using original: {len(iq_seg)} samples")
 
         # Используем тот же путь обработки что и рабочая кнопка File
-        baseline_ms = 10.0  # PSK_BASELINE_MS
+        baseline_ms = 2.0  # PSK_BASELINE_MS - такой же как в FILE режиме
         t0_offset_ms = 0.0
+
+        # ДИАГНОСТИКА: Информация о сегменте перед обработкой
+        print(f"[RUN-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
+        print(f"[RUN-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
+        print(f"[RUN-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
 
         pulse_result = process_psk_impulse(
             iq_seg=iq_seg,  # ПОЛНЫЙ сегмент как в FILE
@@ -201,8 +218,25 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
             print(f"[PSK] process_psk_impulse failed")
             return result
 
-        # Настоящий PSK демодулятор на обработанных фазовых данных
-        msg_hex, phase_res, edges = phase_demod_psk_msg_safe(data=pulse_result["phase_rad"])
+        # Настоящий PSK демодулятор на обработанных фазовых данных с правильным start_idx
+        phase_data = pulse_result["phase_rad"]
+        # Используем тот же start_idx что и в FILE режиме
+        safe_start_idx = min(25000, len(phase_data)//4) if len(phase_data) > 100000 else 0
+        msg_hex, phase_res, edges = phase_demod_psk_msg_safe(
+            data=phase_data,
+            window=40,
+            threshold=0.5,
+            start_idx=safe_start_idx,
+            N=28,
+            min_edges=29
+        )
+
+        # Записываем edges[0] в файл для анализа
+        edges_info = f"[RUN] edges[0] = {edges[0] if edges is not None and len(edges) > 0 else 'No edges'}"
+        edges_info += f", start_idx = {safe_start_idx}, phase_data len = {len(phase_data)}"
+        with open("../edges_run_debug.txt", "w") as f:
+            f.write(edges_info + "\n")
+        print(edges_info)
 
         # Извлекаем результаты демодуляции
         if phase_res and not np.isnan(phase_res.get("PosPhase", np.nan)):
@@ -214,9 +248,9 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
                 'bitrate_bps': 400.0,  # Стандартный PSK-406
                 'pos_phase': float(phase_res.get("PosPhase", 0.78)),
                 'neg_phase': float(phase_res.get("NegPhase", -0.78)),
-                'ph_rise_us': float(phase_res.get("PhRise", 25.0)),
-                'ph_fall_us': float(phase_res.get("PhFall", 23.0)),
-                'asymmetry_pct': float(phase_res.get("Ass", 0.0)),
+                'ph_rise': float(phase_res.get("PhRise", 25.0)),
+                'ph_fall': float(phase_res.get("PhFall", 23.0)),
+                'symmetry_pct': float(phase_res.get("Ass", 0.0)),
                 'msg_hex': msg_hex if msg_hex else None,
                 'msg_ok': bool(msg_hex and len(msg_hex) > 0),
                 # Добавляем фазовые данные для отображения
@@ -229,6 +263,16 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
             print(f"[PSK] Demodulation failed - no valid phases detected")
 
         print(f"[PSK] Analyzed segment: {iq_seg.size} samples, {pulse_len_ms:.1f}ms")
+
+        # Добавляем расчет preamble_ms из edges[0] как в FILE режиме
+        FSd = fs / 4.0  # Частота дискретизации после децимации
+        if edges is not None and len(edges) > 0:
+            preamble_ms = float(edges[0] / FSd * 1e3)
+            result['preamble_ms'] = preamble_ms
+            # Записываем для отладки
+            with open("../preamble_run_debug.txt", "w") as f:
+                f.write(f"[RUN] preamble_ms = {preamble_ms:.3f} (edges[0]={edges[0]}, FSd={FSd})\n")
+            print(f"[RUN] Calculated preamble_ms = {preamble_ms:.3f}")
 
     except Exception as e:
         print(f"[PSK] Analysis error: {e}")
@@ -491,12 +535,33 @@ def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
     """Обработка сегмента импульса для PSK демодуляции"""
     global iq_ring_buffer, last_pulse_data
 
-    # STRICT_COMPAT: Извлекаем сегмент из кольцевого буфера
+    # STRICT_COMPAT: Извлекаем сегмент из кольцевого буфера 
     if iq_ring_buffer is not None:
         # Конвертируем индексы RMS в индексы БП-сигнала
-        bp_start = start_abs - win_samps + 1
+        # ИСПРАВЛЕНИЕ: Захватываем больше данных перед импульсом для поиска преамбулы
+        preamble_ms = 200.0  # Добавляем 200 мс перед импульсом
+        preamble_samples = int(preamble_ms * 1e-3 * get_actual_fs())
+
+        bp_start = max(0, start_abs - win_samps + 1 - preamble_samples)  # Ограничиваем минимумом 0
         bp_end = end_abs + 1
-        iq_segment = iq_ring_buffer.get_segment(bp_start, bp_end)
+
+        # Проверяем доступность данных в буфере используя логику класса
+        oldest_available = max(0, iq_ring_buffer.total_written - iq_ring_buffer.capacity)
+        newest_available = iq_ring_buffer.total_written
+
+        # Корректируем границы под доступные данные
+        effective_start = max(bp_start, oldest_available)
+        effective_end = min(bp_end, newest_available)
+
+        if effective_start < effective_end:
+            iq_segment = iq_ring_buffer.get_segment(effective_start, effective_end)
+        else:
+            iq_segment = np.array([])  # Пустой массив если данных нет
+
+        print(f"[RUN-EXTRACT] Buffer range: {oldest_available} to {newest_available}")
+        print(f"[RUN-EXTRACT] Requested range: {bp_start} to {bp_end}")
+        print(f"[RUN-EXTRACT] Effective range: {effective_start} to {effective_end}")
+        print(f"[RUN-EXTRACT] Extended segment with preamble: {iq_segment.size if hasattr(iq_segment, 'size') else len(iq_segment)} samples, preamble_samples={preamble_samples}")
 
         if iq_segment.size > 0:
             print(f"[PULSE] Extracted segment: {iq_segment.size} samples from buffer")
@@ -526,9 +591,9 @@ def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
                 'bitrate_bps': None,
                 'pos_phase': None,
                 'neg_phase': None,
-                'ph_rise_us': None,
-                'ph_fall_us': None,
-                'asymmetry_pct': None,
+                'ph_rise': None,
+                'ph_fall': None,
+                'symmetry_pct': None,
                 'msg_hex': None,
                 'msg_ok': None
             })
@@ -559,12 +624,12 @@ def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
             STATE.pos_phase = pulse_info['pos_phase']
         if pulse_info.get('neg_phase') is not None:
             STATE.neg_phase = pulse_info['neg_phase']
-        if pulse_info.get('ph_rise_us') is not None:
-            STATE.ph_rise_us = pulse_info['ph_rise_us']
-        if pulse_info.get('ph_fall_us') is not None:
-            STATE.ph_fall_us = pulse_info['ph_fall_us']
-        if pulse_info.get('asymmetry_pct') is not None:
-            STATE.asymmetry_pct = pulse_info['asymmetry_pct']
+        if pulse_info.get('ph_rise') is not None:
+            STATE.ph_rise = pulse_info['ph_rise']
+        if pulse_info.get('ph_fall') is not None:
+            STATE.ph_fall = pulse_info['ph_fall']
+        if pulse_info.get('symmetry_pct') is not None:
+            STATE.symmetry_pct = pulse_info['symmetry_pct']
 
         # Используем уже обработанные данные из analyze_psk406() вместо повторной обработки
         if 'phase_data' in pulse_info and pulse_info['phase_data']:
@@ -631,7 +696,7 @@ def process_cf32_file(file_path):
 
         # Параметры обработки из test_cf32_to_phase_msg_FFT.py
         sample_rate = 1000000  # 1 MHz
-        baseline_ms = 10.0  # PSK_BASELINE_MS из test_cf32
+        baseline_ms = 2.0  # PSK_BASELINE_MS - такой же как в FILE режиме из test_cf32
         t0_offset_ms = 0.0
 
         # Параметры для поиска импульса
@@ -645,6 +710,16 @@ def process_cf32_file(file_path):
 
         if iq_seg is None or len(iq_seg) == 0:
             return {"error": "No pulse found"}
+
+        # ДИАГНОСТИКА: Информация о сегменте перед обработкой
+        print(f"[FILE-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
+        print(f"[FILE-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
+        print(f"[FILE-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
+
+        # ДИАГНОСТИКА: Информация о сегменте перед обработкой
+        print(f"[FILE-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
+        print(f"[FILE-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
+        print(f"[FILE-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
 
         # Обрабатываем сигнал с помощью metrics
         pulse_result = process_psk_impulse(
@@ -677,6 +752,13 @@ def process_cf32_file(file_path):
 
         # Демодуляция PSK сообщения
         msg_hex, phase_res, edges = phase_demod_psk_msg_safe(data=pulse_result["phase_rad"])
+
+        # Записываем edges[0] в файл для анализа
+        edges_info = f"[FILE] edges[0] = {edges[0] if edges is not None and len(edges) > 0 else 'No edges'}"
+        edges_info += f", Using default start_idx=25000, phase_data len = {len(pulse_result['phase_rad'])}"
+        with open("../edges_file_debug.txt", "w") as f:
+            f.write(edges_info + "\n")
+        print(edges_info)
 
         # Извлекаем метрики из результата
         phase_data = pulse_result.get("phase_rad", [])
@@ -778,6 +860,9 @@ def process_cf32_file(file_path):
         FSd = sample_rate / 4.0  # 250000.0
         if edges_list and len(edges_list) > 0:
             preamble_ms = float(edges_list[0] / FSd * 1e3)
+            # Записываем для отладки
+            with open("../preamble_file_debug.txt", "w") as f:
+                f.write(f"[FILE] preamble_ms = {preamble_ms:.3f} (edges[0]={edges_list[0]}, FSd={FSd})\n")
         else:
             preamble_ms = float(baseline_ms)  # fallback
 
@@ -2290,8 +2375,8 @@ HTML_PAGE = """
                         <div class="stat-row" style="background-color: #f8f9fa; margin-top: 5px;"><span class="stat-label">PSK-406 Real-time</span><span class="stat-value">—</span></div>
                         <div class="stat-row"><span class="stat-label">Bitrate,bps</span><span class="stat-value">${last.bitrate_bps !== null ? last.bitrate_bps.toFixed(1) : '—'}</span></div>
                         <div class="stat-row"><span class="stat-label">Pos/Neg phase</span><span class="stat-value">${last.pos_phase !== null && last.neg_phase !== null ? last.pos_phase.toFixed(2) + '/' + last.neg_phase.toFixed(2) : '—'}</span></div>
-                        <div class="stat-row"><span class="stat-label">Rise/Fall,μs</span><span class="stat-value">${last.ph_rise_us !== null && last.ph_fall_us !== null ? last.ph_rise_us.toFixed(1) + '/' + last.ph_fall_us.toFixed(1) : '—'}</span></div>
-                        <div class="stat-row"><span class="stat-label">Asymmetry,%</span><span class="stat-value">${last.asymmetry_pct !== null ? last.asymmetry_pct.toFixed(1) : '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">Rise/Fall,μs</span><span class="stat-value">${last.ph_rise !== null && last.ph_fall !== null ? last.ph_rise.toFixed(1) + '/' + last.ph_fall.toFixed(1) : '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">Asymmetry,%</span><span class="stat-value">${last.symmetry_pct !== null ? last.symmetry_pct.toFixed(1) : '—'}</span></div>
                         <div class="stat-row"><span class="stat-label">Message (HEX)</span><span class="stat-value" style="font-family: monospace;">${last.msg_hex_short || '—'}</span></div>
                         <div class="stat-row"><span class="stat-label">CRC/OK</span><span class="stat-value">${last.msg_ok !== null ? (last.msg_ok ? 'OK' : 'FAIL') : '—'}</span></div>
                     `;
@@ -3512,12 +3597,12 @@ def api_status():
         'fs3_hz': fs3_var,
         'phase_pos_rad': STATE.pos_phase,  # Используем новые значения из demod
         'phase_neg_rad': STATE.neg_phase,
-        't_rise_mcs': STATE.ph_rise_us,    # В микросекундах из demod
-        't_fall_mcs': STATE.ph_fall_us,
+        't_rise_mcs': STATE.ph_rise,    # В микросекундах из demod
+        't_fall_mcs': STATE.ph_fall,
         'p_wt': STATE.p_wt,
         'prise_ms': STATE.prise_ms,
         'bitrate_bps': STATE.bitrate_bps,
-        'symmetry_pct': STATE.asymmetry_pct,  # Используем asymmetry_pct из demod
+        'symmetry_pct': STATE.symmetry_pct,  # Используем symmetry_pct из demod
         'preamble_ms': STATE.preamble_ms,
         'total_ms': STATE.total_ms,
         'rep_period_s': STATE.rep_period_s,
