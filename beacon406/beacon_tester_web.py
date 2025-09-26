@@ -25,7 +25,7 @@ from lib.hex_decoder import hex_to_bits, build_table_rows
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.processing_fm import fm_discriminator
-from lib.backends import make_backend  # SDR backend support
+from lib.backends import safe_make_backend  # SDR backend support
 from lib.config import BACKEND_NAME, BACKEND_ARGS
 import numpy as np
 from werkzeug.utils import secure_filename
@@ -57,11 +57,20 @@ PULSE_THRESH_DBM = -45.0
 READ_CHUNK = 65536
 EPS = 1e-20
 
+# STRICT_COMPAT: Кольцевой буфер IQ и actual sample rate
+iq_ring_buffer = None
+actual_sample_rate_sps = SAMPLE_RATE_SPS  # По умолчанию, обновится при init SDR
+bp_sample_counter = 0  # Счетчик отсчетов БП-сигнала после NCO
+
+# STRICT_COMPAT: История импульсов для PSK-406 анализа
+PULSE_HISTORY_MAX = 50
+pulse_history = deque(maxlen=PULSE_HISTORY_MAX)
+
 # Буферы для обработки данных
 sample_counter = 0
 win_samps = int(RMS_WIN_MS * 1e-3 * SAMPLE_RATE_SPS)
 nco_phase = 0.0
-nco_k = 2.0 * np.pi * BB_SHIFT_HZ / SAMPLE_RATE_SPS
+nco_k = 2.0 * np.pi * BB_SHIFT_HZ / SAMPLE_RATE_SPS  # Будет пересчитан в init_sdr_backend
 tail_p = np.array([], dtype=np.float32)
 full_rms = np.array([], dtype=np.float32)
 full_idx = np.array([], dtype=np.int64)
@@ -72,6 +81,159 @@ time_history = deque(maxlen=1000)
 in_pulse = False
 pulse_start_abs = 0
 last_pulse_data = None
+
+# STRICT_COMPAT: Кольцевой буфер IQ для хранения 3+ секунд сигнала
+class IQRingBuffer:
+    def __init__(self, duration_sec: float, sample_rate: float):
+        self.duration_sec = duration_sec
+        self.sample_rate = sample_rate
+        self.capacity = int(duration_sec * sample_rate)
+        self.buffer = np.zeros(self.capacity, dtype=np.complex64)
+        self.write_pos = 0
+        self.total_written = 0
+        self.lock = threading.Lock()
+        print(f"[BUFFER] Created: {self.capacity} samples ({duration_sec}s at {sample_rate:.0f} Hz)")
+
+    def write(self, samples: np.ndarray):
+        """Записать отсчеты в кольцевой буфер"""
+        with self.lock:
+            n = len(samples)
+            if n >= self.capacity:
+                # Если данных больше емкости, берем последние
+                self.buffer[:] = samples[-self.capacity:]
+                self.write_pos = 0
+                self.total_written += n
+            else:
+                # Запись в две части если переход через границу
+                end_pos = self.write_pos + n
+                if end_pos <= self.capacity:
+                    self.buffer[self.write_pos:end_pos] = samples
+                    self.write_pos = end_pos % self.capacity
+                else:
+                    first_part = self.capacity - self.write_pos
+                    self.buffer[self.write_pos:] = samples[:first_part]
+                    self.buffer[:n-first_part] = samples[first_part:]
+                    self.write_pos = n - first_part
+                self.total_written += n
+
+    def get_segment(self, abs_start: int, abs_end: int) -> np.ndarray:
+        """Извлечь сегмент по абсолютным индексам"""
+        with self.lock:
+            # Проверка доступности данных
+            oldest_available = max(0, self.total_written - self.capacity)
+            if abs_start < oldest_available:
+                print(f"[BUFFER] Segment too old: start={abs_start} < oldest={oldest_available}")
+                return np.array([], dtype=np.complex64)
+
+            # Вычисляем относительные позиции от начала доступных данных
+            available_samples = min(self.total_written, self.capacity)
+            buffer_abs_start = self.total_written - available_samples
+
+            start_offset = abs_start - buffer_abs_start
+            end_offset = abs_end - buffer_abs_start
+
+            if start_offset < 0 or end_offset > available_samples:
+                print(f"[BUFFER] Segment out of bounds: offset={start_offset}..{end_offset}, available={available_samples}")
+                return np.array([], dtype=np.complex64)
+
+            # Case 1: Buffer not yet full (linear access)
+            if self.total_written <= self.capacity:
+                return self.buffer[start_offset:end_offset].copy()
+
+            # Case 2: Buffer is full and wrapped (ring access)
+            else:
+                # write_pos points to oldest data in ring buffer
+                logical_start = (self.write_pos + start_offset) % self.capacity
+                logical_end = (self.write_pos + end_offset) % self.capacity
+
+                if logical_end > logical_start:
+                    # Segment doesn't wrap around
+                    return self.buffer[logical_start:logical_end].copy()
+                else:
+                    # Segment wraps around buffer boundary
+                    return np.concatenate([
+                        self.buffer[logical_start:],
+                        self.buffer[:logical_end]
+                    ]).copy()
+
+def get_actual_fs() -> float:
+    """Получить фактический sample rate"""
+    global actual_sample_rate_sps
+    return actual_sample_rate_sps
+
+# STRICT_COMPAT: PSK-406 анализ с заглушкой демодуляции
+def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
+    """Анализ PSK-406 сигнала с заглушкой для будущей интеграции"""
+    result = {
+        'bitrate_bps': None,
+        'pos_phase': None,
+        'neg_phase': None,
+        'ph_rise_us': None,
+        'ph_fall_us': None,
+        'asymmetry_pct': None,
+        'msg_hex': None,
+        'msg_ok': None
+    }
+
+    try:
+        if iq_seg.size == 0:
+            return result
+
+        pulse_len_ms = len(iq_seg) / fs * 1000
+
+        # Используем полный сегмент как в FILE - БЕЗ дополнительного обрезания
+        print(f"[PSK] Processing full segment: {len(iq_seg)} samples, {pulse_len_ms:.1f}ms")
+
+        # Используем тот же путь обработки что и рабочая кнопка File
+        baseline_ms = 10.0  # PSK_BASELINE_MS
+        t0_offset_ms = 0.0
+
+        pulse_result = process_psk_impulse(
+            iq_seg=iq_seg,  # ПОЛНЫЙ сегмент как в FILE
+            fs=fs,
+            baseline_ms=baseline_ms,
+            t0_offset_ms=t0_offset_ms,
+            use_lpf_decim=True,
+            remove_slope=True,
+        )
+
+        if not pulse_result or "phase_rad" not in pulse_result:
+            print(f"[PSK] process_psk_impulse failed")
+            return result
+
+        # Настоящий PSK демодулятор на обработанных фазовых данных
+        msg_hex, phase_res, edges = phase_demod_psk_msg_safe(data=pulse_result["phase_rad"])
+
+        # Извлекаем результаты демодуляции
+        if phase_res and not np.isnan(phase_res.get("PosPhase", np.nan)):
+            # Добавляем фазовые данные для STATE как в FILE
+            phase_data = pulse_result["phase_rad"]
+            xs_ms = pulse_result.get("xs_ms", [])
+
+            result.update({
+                'bitrate_bps': 400.0,  # Стандартный PSK-406
+                'pos_phase': float(phase_res.get("PosPhase", 0.78)),
+                'neg_phase': float(phase_res.get("NegPhase", -0.78)),
+                'ph_rise_us': float(phase_res.get("PhRise", 25.0)),
+                'ph_fall_us': float(phase_res.get("PhFall", 23.0)),
+                'asymmetry_pct': float(phase_res.get("Ass", 0.0)),
+                'msg_hex': msg_hex if msg_hex else None,
+                'msg_ok': bool(msg_hex and len(msg_hex) > 0),
+                # Добавляем фазовые данные для отображения
+                'phase_data': phase_data.tolist() if hasattr(phase_data, 'tolist') else list(phase_data),
+                'xs_ms': xs_ms.tolist() if hasattr(xs_ms, 'tolist') else list(xs_ms)
+            })
+            print(f"[PSK] Real demod: {msg_hex}, phases: pos={result['pos_phase']:.3f}, neg={result['neg_phase']:.3f}")
+            print(f"[PSK] Phase data: {len(result['phase_data'])} points, sample: {result['phase_data'][:3]}")
+        else:
+            print(f"[PSK] Demodulation failed - no valid phases detected")
+
+        print(f"[PSK] Analyzed segment: {iq_seg.size} samples, {pulse_len_ms:.1f}ms")
+
+    except Exception as e:
+        print(f"[PSK] Analysis error: {e}")
+
+    return result
 
 def db10(x: np.ndarray) -> np.ndarray:
     """dB calculation helper"""
@@ -92,10 +254,10 @@ def init_sdr_backend():
 
         extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
 
-        sdr_backend = make_backend(
+        sdr_backend = safe_make_backend(
             BACKEND_NAME,
             sample_rate=SAMPLE_RATE_SPS,
-            center_freq=float(CENTER_FREQ_HZ),
+            center_freq=CENTER_FREQ_HZ,
             gain_db=30.0,
             agc=False,
             corr_ppm=0,
@@ -110,6 +272,16 @@ def init_sdr_backend():
             driver = status.get('driver', BACKEND_NAME)
             sdr_device_info = f"{driver}: {device_info}"
             print(f"[SDR] Detected: {sdr_device_info}")
+
+            # STRICT_COMPAT: Сохраняем actual sample rate и создаем буфер
+            global actual_sample_rate_sps, iq_ring_buffer, win_samps, nco_k
+            actual_sample_rate_sps = status.get('actual_sample_rate_sps', SAMPLE_RATE_SPS)
+            iq_ring_buffer = IQRingBuffer(duration_sec=3.0, sample_rate=actual_sample_rate_sps)
+            # Обновляем win_samps и nco_k с фактическим sample rate
+            win_samps = int(RMS_WIN_MS * 1e-3 * actual_sample_rate_sps)
+            nco_k = 2.0 * np.pi * BB_SHIFT_HZ / actual_sample_rate_sps
+            print(f"[SDR] Actual sample rate: {actual_sample_rate_sps:.3f} Hz")
+            print(f"[SDR] IQ buffer created for {iq_ring_buffer.duration_sec} seconds")
         except Exception:
             sdr_device_info = f"{BACKEND_NAME} device"
 
@@ -217,6 +389,12 @@ def process_samples_realtime(samples: np.ndarray):
         x *= mixer
         nco_phase = float((nco_phase + nco_k * samples.size) % (2.0 * np.pi))
 
+    # STRICT_COMPAT: Запись БП-сигнала в кольцевой буфер
+    global iq_ring_buffer, bp_sample_counter
+    if iq_ring_buffer is not None:
+        iq_ring_buffer.write(x)
+        bp_sample_counter += len(x)
+
     # Вычисление мощности
     p_block = (np.abs(x) ** 2)
 
@@ -251,6 +429,13 @@ def process_samples_realtime(samples: np.ndarray):
                 rms_history.append(float(rms_val))
                 # Обновляем текущее значение RMS
                 current_rms_dbm = float(rms_val)
+                
+                
+        # DEBUG: печать диапазона dBm и доли точек выше порога
+        #peak = float(np.max(rms_dbm_vec)) if rms_dbm_vec.size else float('-inf')
+        #frac = float(np.mean(rms_dbm_vec >= PULSE_THRESH_DBM)) if rms_dbm_vec.size else 0.0
+        #print(f"[RMS] max={peak:.1f} dBm, thr={PULSE_THRESH_DBM:.1f} dBm, over={frac*100:.1f}%")
+
 
         # Детекция импульсов
         detect_pulses(rms_dbm_vec, idx_end, x, p_cont_start_idx)
@@ -287,7 +472,7 @@ def detect_pulses(rms_dbm_vec, idx_end, iq_data, start_idx):
         if in_pulse:
             pulse_end_abs = idx_end[end_idx_local]
             pulse_len_samples = pulse_end_abs - pulse_start_abs + 1
-            pulse_len_ms = pulse_len_samples / SAMPLE_RATE_SPS * 1000
+            pulse_len_ms = pulse_len_samples / get_actual_fs() * 1000
 
             print(f"[PULSE] Ended at sample {pulse_end_abs}, length: {pulse_len_ms:.1f}ms")
 
@@ -296,25 +481,57 @@ def detect_pulses(rms_dbm_vec, idx_end, iq_data, start_idx):
                 try:
                     # Извлекаем сегмент IQ данных для импульса
                     # (Здесь нужна более сложная логика для извлечения правильного сегмента)
-                    process_pulse_segment(pulse_start_abs, pulse_end_abs, iq_data)
+                    process_pulse_segment(pulse_start_abs, pulse_end_abs)
                 except Exception as e:
                     print(f"[PULSE] Processing error: {e}")
 
             in_pulse = False
 
-def process_pulse_segment(start_abs, end_abs, iq_segment):
+def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
     """Обработка сегмента импульса для PSK демодуляции"""
-    global last_pulse_data
+    global iq_ring_buffer, last_pulse_data
+
+    # STRICT_COMPAT: Извлекаем сегмент из кольцевого буфера
+    if iq_ring_buffer is not None:
+        # Конвертируем индексы RMS в индексы БП-сигнала
+        bp_start = start_abs - win_samps + 1
+        bp_end = end_abs + 1
+        iq_segment = iq_ring_buffer.get_segment(bp_start, bp_end)
+
+        if iq_segment.size > 0:
+            print(f"[PULSE] Extracted segment: {iq_segment.size} samples from buffer")
+        else:
+            print(f"[PULSE] Segment not available in buffer, using fallback")
+            iq_segment = iq_fallback if iq_fallback is not None else np.array([])
+    else:
+        iq_segment = iq_fallback if iq_fallback is not None else np.array([])
 
     try:
-        # Здесь будет PSK демодуляция
-        # Пока что просто сохраняем информацию о импульсе
+        # STRICT_COMPAT: PSK-406 анализ сегмента импульса
         pulse_info = {
-            'start_sample': int(start_abs),
-            'end_sample': int(end_abs),
-            'length_ms': float((end_abs - start_abs) / SAMPLE_RATE_SPS * 1000),
-            'timestamp': time.time()
+            'start_abs': int(start_abs),
+            'end_abs': int(end_abs),
+            'length_ms': float((end_abs - start_abs) / get_actual_fs() * 1000),
+            'timestamp': time.time(),
+            'iq_size': int(iq_segment.size) if hasattr(iq_segment, 'size') else 0
         }
+
+        # Выполняем PSK-анализ если сегмент доступен
+        if iq_segment.size > 0:
+            psk_result = analyze_psk406(iq_segment, get_actual_fs())
+            pulse_info.update(psk_result)
+        else:
+            # Заполняем PSK-поля значениями по умолчанию если сегмент недоступен
+            pulse_info.update({
+                'bitrate_bps': None,
+                'pos_phase': None,
+                'neg_phase': None,
+                'ph_rise_us': None,
+                'ph_fall_us': None,
+                'asymmetry_pct': None,
+                'msg_hex': None,
+                'msg_ok': None
+            })
 
         # Добавляем в очередь для обработки веб-интерфейсом
         try:
@@ -328,7 +545,36 @@ def process_pulse_segment(start_abs, end_abs, iq_segment):
                 pass
 
         last_pulse_data = pulse_info
-        print(f"[PULSE] Processed: {pulse_info['length_ms']:.1f}ms")
+
+        # STRICT_COMPAT: Добавляем в историю импульсов
+        global pulse_history
+        pulse_history.append(pulse_info.copy())
+
+        # STRICT_COMPAT: Обновляем STATE для совместимости со старым интерфейсом
+        if 'msg_hex' in pulse_info and pulse_info['msg_hex']:
+            STATE.hex_message = pulse_info['msg_hex']
+
+        # Обновляем PSK метрики в STATE
+        if pulse_info.get('pos_phase') is not None:
+            STATE.pos_phase = pulse_info['pos_phase']
+        if pulse_info.get('neg_phase') is not None:
+            STATE.neg_phase = pulse_info['neg_phase']
+        if pulse_info.get('ph_rise_us') is not None:
+            STATE.ph_rise_us = pulse_info['ph_rise_us']
+        if pulse_info.get('ph_fall_us') is not None:
+            STATE.ph_fall_us = pulse_info['ph_fall_us']
+        if pulse_info.get('asymmetry_pct') is not None:
+            STATE.asymmetry_pct = pulse_info['asymmetry_pct']
+
+        # Используем уже обработанные данные из analyze_psk406() вместо повторной обработки
+        if 'phase_data' in pulse_info and pulse_info['phase_data']:
+            STATE.phase_data = pulse_info['phase_data']
+            STATE.xs_fm_ms = pulse_info.get('xs_ms', [])
+            print(f"[STATE] Using phase data from analyze_psk406: {len(STATE.phase_data)} points")
+        else:
+            print(f"[STATE] No phase data from analyze_psk406()")
+
+        print(f"[PULSE] Processed: {pulse_info['length_ms']:.1f}ms, PSK: {pulse_info.get('msg_ok', 'N/A')}")
 
     except Exception as e:
         print(f"[PULSE] Segment processing error: {e}")
@@ -2035,7 +2281,28 @@ HTML_PAGE = """
                 <div class="stat-row"><span class="stat-label">Total,ms</span><span class="stat-value">${data.total_ms.toFixed(3)}</span></div>
                 <div class="stat-row"><span class="stat-label">RepPeriod,s</span><span class="stat-value">${data.rep_period_s.toFixed(3)}</span></div>
             `;
-            document.getElementById('statsContent').innerHTML = statsHtml;
+
+            // STRICT_COMPAT: Получаем данные последнего импульса для PSK метрик
+            fetch('/api/last_pulse').then(response => response.json()).then(pulseData => {
+                if (pulseData.last) {
+                    const last = pulseData.last;
+                    const pskHtml = `
+                        <div class="stat-row" style="background-color: #f8f9fa; margin-top: 5px;"><span class="stat-label">PSK-406 Real-time</span><span class="stat-value">—</span></div>
+                        <div class="stat-row"><span class="stat-label">Bitrate,bps</span><span class="stat-value">${last.bitrate_bps !== null ? last.bitrate_bps.toFixed(1) : '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">Pos/Neg phase</span><span class="stat-value">${last.pos_phase !== null && last.neg_phase !== null ? last.pos_phase.toFixed(2) + '/' + last.neg_phase.toFixed(2) : '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">Rise/Fall,μs</span><span class="stat-value">${last.ph_rise_us !== null && last.ph_fall_us !== null ? last.ph_rise_us.toFixed(1) + '/' + last.ph_fall_us.toFixed(1) : '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">Asymmetry,%</span><span class="stat-value">${last.asymmetry_pct !== null ? last.asymmetry_pct.toFixed(1) : '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">Message (HEX)</span><span class="stat-value" style="font-family: monospace;">${last.msg_hex_short || '—'}</span></div>
+                        <div class="stat-row"><span class="stat-label">CRC/OK</span><span class="stat-value">${last.msg_ok !== null ? (last.msg_ok ? 'OK' : 'FAIL') : '—'}</span></div>
+                    `;
+                    document.getElementById('statsContent').innerHTML = statsHtml + pskHtml;
+                } else {
+                    document.getElementById('statsContent').innerHTML = statsHtml;
+                }
+            }).catch(error => {
+                console.error('Error fetching pulse data:', error);
+                document.getElementById('statsContent').innerHTML = statsHtml;
+            });
         }
 
 
@@ -3017,8 +3284,30 @@ HTML_PAGE = """
             }
         }
 
+        // STRICT_COMPAT: Функция для polling системной информации
+        async function fetchSystemState() {
+            try {
+                const response = await fetch('/api/state');
+                const data = await response.json();
+
+                // Обновляем системную информацию в интерфейсе
+                console.log('System state:', data.sdr_running ? 'SDR Running' : 'SDR Idle',
+                           'RMS:', data.current_rms_dbm.toFixed(1), 'dBm',
+                           'Buffer:', data.iq_buffer_info.total_written, 'samples');
+
+                // Можно добавить отображение этих данных в интерфейсе
+                if (data.sdr_device_info) {
+                    document.getElementById('sdrStatus').textContent = data.sdr_device_info;
+                }
+
+            } catch (error) {
+                console.error('Error fetching system state:', error);
+            }
+        }
+
         // Переменная для управления таймером обновления
         let updateTimer = null;
+        let systemStateTimer = null;
         let isRunning = false;
 
         function startUpdating() {
@@ -3026,6 +3315,11 @@ HTML_PAGE = """
                 updateTimer = setInterval(fetchData, 700);
                 isRunning = true;
                 console.log('Graph updating started');
+            }
+            // STRICT_COMPAT: Запускаем polling системного состояния каждую секунду
+            if (!systemStateTimer) {
+                systemStateTimer = setInterval(fetchSystemState, 1000);
+                console.log('System state polling started');
             }
         }
 
@@ -3035,6 +3329,12 @@ HTML_PAGE = """
                 updateTimer = null;
                 isRunning = false;
                 console.log('Graph updating stopped');
+            }
+            // STRICT_COMPAT: Останавливаем системный таймер
+            if (systemStateTimer) {
+                clearInterval(systemStateTimer);
+                systemStateTimer = null;
+                console.log('System state polling stopped');
             }
         }
 
@@ -3212,12 +3512,12 @@ def api_status():
         'fs3_hz': fs3_var,
         'phase_pos_rad': STATE.pos_phase,  # Используем новые значения из demod
         'phase_neg_rad': STATE.neg_phase,
-        't_rise_mcs': STATE.ph_rise,       # В микросекундах из demod
-        't_fall_mcs': STATE.ph_fall,
+        't_rise_mcs': STATE.ph_rise_us,    # В микросекундах из demod
+        't_fall_mcs': STATE.ph_fall_us,
         'p_wt': STATE.p_wt,
         'prise_ms': STATE.prise_ms,
         'bitrate_bps': STATE.bitrate_bps,
-        'symmetry_pct': STATE.asymmetry,  # Используем asymmetry из demod
+        'symmetry_pct': STATE.asymmetry_pct,  # Используем asymmetry_pct из demod
         'preamble_ms': STATE.preamble_ms,
         'total_ms': STATE.total_ms,
         'rep_period_s': STATE.rep_period_s,
@@ -3424,6 +3724,77 @@ def api_upload():
     except Exception as e:
         print(f"Upload error: {e}")
         return jsonify({'error': str(e)}), 500
+
+# STRICT_COMPAT: Новые API endpoints
+@app.route('/api/init', methods=['POST'])
+def api_init():
+    """Инициализация SDR backend"""
+    try:
+        success = init_sdr_backend()
+        return jsonify({
+            'status': 'success' if success else 'failed',
+            'sdr_device_info': sdr_device_info,
+            'actual_sample_rate_sps': actual_sample_rate_sps,
+            'iq_buffer_capacity': iq_ring_buffer.capacity if iq_ring_buffer else 0,
+            'iq_buffer_duration_sec': iq_ring_buffer.duration_sec if iq_ring_buffer else 0.0
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/api/state')
+def api_state():
+    """Получение текущего состояния системы"""
+    with data_lock:
+        return jsonify({
+            'sdr_running': sdr_running,
+            'sdr_device_info': sdr_device_info,
+            'current_rms_dbm': current_rms_dbm,
+            'sample_counter': int(sample_counter),
+            'bp_sample_counter': int(bp_sample_counter),
+            'actual_sample_rate_sps': actual_sample_rate_sps,
+            'iq_buffer_info': {
+                'total_written': int(iq_ring_buffer.total_written) if iq_ring_buffer else 0,
+                'capacity': int(iq_ring_buffer.capacity) if iq_ring_buffer else 0,
+                'write_pos': int(iq_ring_buffer.write_pos) if iq_ring_buffer else 0,
+                'duration_sec': iq_ring_buffer.duration_sec if iq_ring_buffer else 0.0
+            },
+            'pulse_status': {
+                'in_pulse': in_pulse,
+                'pulse_start_abs': int(pulse_start_abs)
+            },
+            'timestamp': time.time()
+        })
+
+@app.route('/api/last_pulse')
+def api_last_pulse():
+    """Получение информации о последнем импульсе и истории"""
+    with data_lock:
+        # STRICT_COMPAT: Подготовка истории импульсов для передачи
+        history_items = []
+        for pulse in list(pulse_history)[-20:]:  # Последние ≤20 импульсов
+            item = pulse.copy()
+            # Усекаем msg_hex для сети (64 символа + ...)
+            if item.get('msg_hex') and len(item['msg_hex']) > 64:
+                item['msg_hex_short'] = item['msg_hex'][:64] + '...'
+            else:
+                item['msg_hex_short'] = item.get('msg_hex', '')
+            history_items.append(item)
+
+        # Подготовка последнего импульса
+        last = None
+        if last_pulse_data:
+            last = last_pulse_data.copy()
+            if last.get('msg_hex') and len(last['msg_hex']) > 64:
+                last['msg_hex_short'] = last['msg_hex'][:64] + '...'
+            else:
+                last['msg_hex_short'] = last.get('msg_hex', '')
+
+        return jsonify({
+            'last': last,
+            'history': history_items,
+            'pulse_queue_size': pulse_queue.qsize(),
+            'timestamp': time.time()
+        })
 
 if __name__ == '__main__':
     print(">>> Starting COSPAS/SARSAT Beacon Tester v2.1")
