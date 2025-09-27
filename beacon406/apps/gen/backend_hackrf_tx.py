@@ -1,5 +1,9 @@
-
 import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from lib.logger import get_logger
+log = get_logger(__name__)
 import subprocess
 import tempfile
 from typing import Optional, Tuple, Union
@@ -111,7 +115,7 @@ def _run_hackrf_transfer(
             if proc.returncode != 0:
                 raise RuntimeError(f"hackrf_transfer failed: {proc.stderr.strip() or proc.stdout.strip()}")
             # если хочешь видеть stdout/stderr даже при успехе:
-            print(proc.stdout.strip(), proc.stderr.strip())
+            log.info(proc.stdout.strip(), proc.stderr.strip())
 
 
         if isinstance(repeat, str) and repeat.lower() == "loop":
@@ -176,9 +180,9 @@ def hackrf_tx_from_array(
 
     sc8 = _iq_cf32_to_sc8(iq_proc, amp_scale=amp_scale)
 
-    print(f"[TX] Target {target_signal_hz:.0f} Hz | IF {if_offset_hz:+.0f} Hz -> LO {center:.0f} Hz | f_set(hz) {center_set:.0f} Hz")
-    print(f"[TX] Fs_in {Fs_in} -> Fs_tx {tx_sample_rate_sps} | repeat={repeat} gap_s={gap_s} | tx_gain={tx_gain_db} dB | PA={'on' if hw_amp_enabled else 'off'}")
-    print(f"[TX] digital_shift_hz={digital_shift_hz:+.1f} | amp_scale={amp_scale} | sc8_bytes={len(sc8)}")
+    log.info(f"[TX] Target {target_signal_hz:.0f} Hz | IF {if_offset_hz:+.0f} Hz -> LO {center:.0f} Hz | f_set(hz) {center_set:.0f} Hz")
+    log.info(f"[TX] Fs_in {Fs_in} -> Fs_tx {tx_sample_rate_sps} | repeat={repeat} gap_s={gap_s} | tx_gain={tx_gain_db} dB | PA={'on' if hw_amp_enabled else 'off'}")
+    log.info(f"[TX] digital_shift_hz={digital_shift_hz:+.1f} | amp_scale={amp_scale} | sc8_bytes={len(sc8)}")
 
     if transport != "hackrf_transfer":
         raise NotImplementedError("Only 'hackrf_transfer' transport implemented in this version.")

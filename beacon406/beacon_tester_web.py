@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 COSPAS/SARSAT Beacon Tester - Version 2.0
 =========================================
@@ -5,8 +6,8 @@ COSPAS/SARSAT Beacon Tester - Version 2.0
 Одностраничное Flask приложение с аутентичным дизайном.
 Порт: 8738 (чтобы не конфликтовать с оригинальным)
 """
-
-from __future__ import annotations
+from lib.logger import get_logger
+log = get_logger(__name__)
 import math
 import random
 import time
@@ -27,6 +28,10 @@ from lib.demod import phase_demod_psk_msg_safe
 from lib.processing_fm import fm_discriminator
 from lib.backends import safe_make_backend  # SDR backend support
 from lib.config import BACKEND_NAME, BACKEND_ARGS
+from lib.logger import get_logger, setup_logging
+
+setup_logging()
+log = get_logger(__name__)
 import numpy as np
 from werkzeug.utils import secure_filename
 
@@ -92,7 +97,7 @@ class IQRingBuffer:
         self.write_pos = 0
         self.total_written = 0
         self.lock = threading.Lock()
-        print(f"[BUFFER] Created: {self.capacity} samples ({duration_sec}s at {sample_rate:.0f} Hz)")
+        log.info(f"IQ buffer created: {self.capacity} samples ({duration_sec}s at {sample_rate:.0f} Hz)")
 
     def write(self, samples: np.ndarray):
         """Записать отсчеты в кольцевой буфер"""
@@ -122,7 +127,7 @@ class IQRingBuffer:
             # Проверка доступности данных
             oldest_available = max(0, self.total_written - self.capacity)
             if abs_start < oldest_available:
-                print(f"[BUFFER] Segment too old: start={abs_start} < oldest={oldest_available}")
+                log.debug(f"[BUFFER] Segment too old: start={abs_start} < oldest={oldest_available}")
                 return np.array([], dtype=np.complex64)
 
             # Вычисляем относительные позиции от начала доступных данных
@@ -133,7 +138,7 @@ class IQRingBuffer:
             end_offset = abs_end - buffer_abs_start
 
             if start_offset < 0 or end_offset > available_samples:
-                print(f"[BUFFER] Segment out of bounds: offset={start_offset}..{end_offset}, available={available_samples}")
+                log.debug(f"[BUFFER] Segment out of bounds: offset={start_offset}..{end_offset}, available={available_samples}")
                 return np.array([], dtype=np.complex64)
 
             # Case 1: Buffer not yet full (linear access)
@@ -192,18 +197,18 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         
         if iq_seg_trimmed is not None and len(iq_seg_trimmed) > 0:
             iq_seg = iq_seg_trimmed  
-            print(f"[PSK-RUN] _find_pulse_segment success: {len(iq_seg)} samples")
+            log.debug(f"[PSK-RUN] _find_pulse_segment success: {len(iq_seg)} samples")
         else:
-            print(f"[PSK-RUN] _find_pulse_segment failed, using original: {len(iq_seg)} samples")
+            log.debug(f"[PSK-RUN] _find_pulse_segment failed, using original: {len(iq_seg)} samples")
 
         # Используем тот же путь обработки что и рабочая кнопка File
         baseline_ms = 2.0  # PSK_BASELINE_MS - такой же как в FILE режиме
         t0_offset_ms = 0.0
 
         # ДИАГНОСТИКА: Информация о сегменте перед обработкой
-        print(f"[RUN-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
-        print(f"[RUN-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
-        print(f"[RUN-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
+        log.debug(f"[RUN-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
+        log.debug(f"[RUN-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
+        log.debug(f"[RUN-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
 
         pulse_result = process_psk_impulse(
             iq_seg=iq_seg,  # ПОЛНЫЙ сегмент как в FILE
@@ -215,7 +220,7 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         )
 
         if not pulse_result or "phase_rad" not in pulse_result:
-            print(f"[PSK] process_psk_impulse failed")
+            log.debug("[PSK] process_psk_impulse failed")
             return result
 
         # Настоящий PSK демодулятор на обработанных фазовых данных с правильным start_idx
@@ -234,7 +239,7 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         # Записываем edges[0] в файл для анализа
         edges_info = f"[RUN] edges[0] = {edges[0] if edges is not None and len(edges) > 0 else 'No edges'}"
         edges_info += f", start_idx = {safe_start_idx}, phase_data len = {len(phase_data)}"
-        print(edges_info)
+        log.debug(edges_info)
 
         # Извлекаем результаты демодуляции
         if phase_res and not np.isnan(phase_res.get("PosPhase", np.nan)):
@@ -255,12 +260,12 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
                 'phase_data': phase_data.tolist() if hasattr(phase_data, 'tolist') else list(phase_data),
                 'xs_ms': xs_ms.tolist() if hasattr(xs_ms, 'tolist') else list(xs_ms)
             })
-            print(f"[PSK] Real demod: {msg_hex}, phases: pos={result['pos_phase']:.3f}, neg={result['neg_phase']:.3f}")
-            print(f"[PSK] Phase data: {len(result['phase_data'])} points, sample: {result['phase_data'][:3]}")
+            log.info(f"PSK demod: {msg_hex}, phases: pos={result['pos_phase']:.3f}, neg={result['neg_phase']:.3f}")
+            log.debug(f"[PSK] Phase data: {len(result['phase_data'])} points, sample: {result['phase_data'][:3]}")
         else:
-            print(f"[PSK] Demodulation failed - no valid phases detected")
+            log.debug("[PSK] Demodulation failed - no valid phases detected")
 
-        print(f"[PSK] Analyzed segment: {iq_seg.size} samples, {pulse_len_ms:.1f}ms")
+        log.debug(f"[PSK] Analyzed segment: {iq_seg.size} samples, {pulse_len_ms:.1f}ms")
 
         # NEW: FM discriminator с теми же параметрами что в File режиме
         try:
@@ -282,9 +287,9 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
             result['fm_data'] = fm_freq.tolist() if isinstance(fm_freq, np.ndarray) else list(fm_freq) if fm_freq is not None else []
             result['fm_xs_ms'] = fm_xs.tolist() if isinstance(fm_xs, np.ndarray) else list(fm_xs) if fm_xs is not None else []
 
-            print(f"[FM-RUN] FM processed: {len(result['fm_data'])} freq points, {len(result['fm_xs_ms'])} time points")
+            log.debug(f"[FM-RUN] FM processed: {len(result['fm_data'])} freq points, {len(result['fm_xs_ms'])} time points")
         except Exception as e:
-            print(f"[FM-RUN] FM processing error: {e}")
+            log.error(f"[FM-RUN] FM processing error: {e}")
             result['fm_data'] = []
             result['fm_xs_ms'] = []
 
@@ -293,10 +298,10 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         if edges is not None and len(edges) > 0:
             preamble_ms = float(edges[0] / FSd * 1e3)
             result['preamble_ms'] = preamble_ms
-            print(f"[RUN] Calculated preamble_ms = {preamble_ms:.3f}")
+            log.debug(f"[RUN] Calculated preamble_ms = {preamble_ms:.3f}")
 
     except Exception as e:
-        print(f"[PSK] Analysis error: {e}")
+        log.error(f"[PSK] Analysis error: {e}")
 
     return result
 
@@ -311,11 +316,11 @@ def init_sdr_backend():
     # Если backend не настроен или auto, пробуем инициализацию
     if BACKEND_NAME == "none" or not BACKEND_NAME:
         sdr_device_info = "SDR disabled (config: none)"
-        print(f"[SDR] {sdr_device_info}")
+        log.info(f"SDR status: {sdr_device_info}")
         return False
 
     try:
-        print(f"[SDR] Initializing backend: {BACKEND_NAME}")
+        log.info(f"Initializing SDR backend: {BACKEND_NAME}")
 
         extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
 
@@ -336,7 +341,7 @@ def init_sdr_backend():
             device_info = status.get('device_info', 'Unknown device')
             driver = status.get('driver', BACKEND_NAME)
             sdr_device_info = f"{driver}: {device_info}"
-            print(f"[SDR] Detected: {sdr_device_info}")
+            log.info(f"SDR detected: {sdr_device_info}")
 
             # STRICT_COMPAT: Сохраняем actual sample rate и создаем буфер
             global actual_sample_rate_sps, iq_ring_buffer, win_samps, nco_k
@@ -345,8 +350,7 @@ def init_sdr_backend():
             # Обновляем win_samps и nco_k с фактическим sample rate
             win_samps = int(RMS_WIN_MS * 1e-3 * actual_sample_rate_sps)
             nco_k = 2.0 * np.pi * BB_SHIFT_HZ / actual_sample_rate_sps
-            print(f"[SDR] Actual sample rate: {actual_sample_rate_sps:.3f} Hz")
-            print(f"[SDR] IQ buffer created for {iq_ring_buffer.duration_sec} seconds")
+            log.info(f"SDR sample rate: {actual_sample_rate_sps:.3f} Hz, buffer: {iq_ring_buffer.duration_sec} seconds")
         except Exception:
             sdr_device_info = f"{BACKEND_NAME} device"
 
@@ -368,7 +372,7 @@ def init_sdr_backend():
             clean_msg = ''.join(c if ord(c) < 128 else '?' for c in error_msg)
             sdr_device_info = f"SDR init failed: {clean_msg[:35]}"
 
-        print(f"[SDR] Initialization failed (non-critical)")
+        log.warning("SDR initialization failed (non-critical)")
         return False
 
 def start_sdr_capture():
@@ -376,30 +380,30 @@ def start_sdr_capture():
     global sdr_running, reader_thread
 
     if not sdr_backend:
-        print("[SDR] Backend not initialized, cannot start capture")
+        log.warning("SDR backend not initialized, cannot start capture")
         return False
 
     if sdr_running:
-        print("[SDR] Capture already running")
+        log.debug("SDR capture already running")
         return True
 
     sdr_running = True
     reader_thread = threading.Thread(target=sdr_reader_loop, daemon=True)
     reader_thread.start()
-    print("[SDR] Real-time capture started")
+    log.info("Real-time SDR capture started")
     return True
 
 def stop_sdr_capture():
     """Остановка захвата SDR данных"""
     global sdr_running
     sdr_running = False
-    print("[SDR] Real-time capture stopped")
+    log.info("Real-time SDR capture stopped")
 
 def sdr_reader_loop():
     """Основной цикл чтения и обработки SDR данных"""
     global sample_counter, nco_phase, tail_p, full_rms, full_idx, in_pulse, pulse_start_abs, sdr_running
 
-    print("[SDR] Reader loop starting...")
+    log.debug("SDR reader loop starting...")
     error_count = 0
     max_errors = 10
 
@@ -410,10 +414,10 @@ def sdr_reader_loop():
                 samples = sdr_backend.read(READ_CHUNK)
                 if samples.size == 0:
                     if BACKEND_NAME == "file":
-                        print("[SDR] EOF reached in file mode - stopping")
+                        log.info("EOF reached in file mode - stopping")
                         break
                     else:
-                        print("[SDR] No samples received, retrying...")
+                        log.debug("No samples received, retrying...")
                         time.sleep(0.1)
                         continue
 
@@ -423,19 +427,19 @@ def sdr_reader_loop():
 
             except Exception as e:
                 error_count += 1
-                print(f"[SDR] Read error #{error_count}: {e}")
+                log.error(f"SDR read error #{error_count}: {e}")
 
                 if error_count >= max_errors:
-                    print(f"[SDR] Too many errors ({error_count}), stopping capture")
+                    log.error(f"Too many SDR errors ({error_count}), stopping capture")
                     break
 
                 time.sleep(0.1)  # Увеличиваем паузу при ошибках
                 continue
 
     except Exception as e:
-        print(f"[SDR] Critical reader loop error: {e}")
+        log.error(f"Critical SDR reader loop error: {e}")
     finally:
-        print("[SDR] Reader loop exiting...")
+        log.debug("SDR reader loop exiting...")
         # НЕ вызываем stop_sdr_capture() здесь чтобы избежать рекурсии
         sdr_running = False
 
@@ -499,7 +503,7 @@ def process_samples_realtime(samples: np.ndarray):
         # DEBUG: печать диапазона dBm и доли точек выше порога
         #peak = float(np.max(rms_dbm_vec)) if rms_dbm_vec.size else float('-inf')
         #frac = float(np.mean(rms_dbm_vec >= PULSE_THRESH_DBM)) if rms_dbm_vec.size else 0.0
-        #print(f"[RMS] max={peak:.1f} dBm, thr={PULSE_THRESH_DBM:.1f} dBm, over={frac*100:.1f}%")
+        #log.debug(f"[RMS] max={peak:.1f} dBm, thr={PULSE_THRESH_DBM:.1f} dBm, over={frac*100:.1f}%")
 
 
         # Детекция импульсов
@@ -530,7 +534,7 @@ def detect_pulses(rms_dbm_vec, idx_end, iq_data, start_idx):
         if not in_pulse:
             in_pulse = True
             pulse_start_abs = idx_end[start_idx_local]
-            print(f"[PULSE] Started at sample {pulse_start_abs}")
+            log.debug(f"[PULSE] Started at sample {pulse_start_abs}")
 
     # Обработка конца импульса
     for end_idx_local in end_pos:
@@ -539,7 +543,7 @@ def detect_pulses(rms_dbm_vec, idx_end, iq_data, start_idx):
             pulse_len_samples = pulse_end_abs - pulse_start_abs + 1
             pulse_len_ms = pulse_len_samples / get_actual_fs() * 1000
 
-            print(f"[PULSE] Ended at sample {pulse_end_abs}, length: {pulse_len_ms:.1f}ms")
+            log.info(f"Pulse detected: {pulse_end_abs}, length: {pulse_len_ms:.1f}ms")
 
             # Если импульс достаточно длинный, пытаемся демодулировать
             if pulse_len_ms >= 400:  # Минимальная длина для PSK406 маяка
@@ -548,7 +552,7 @@ def detect_pulses(rms_dbm_vec, idx_end, iq_data, start_idx):
                     # (Здесь нужна более сложная логика для извлечения правильного сегмента)
                     process_pulse_segment(pulse_start_abs, pulse_end_abs)
                 except Exception as e:
-                    print(f"[PULSE] Processing error: {e}")
+                    log.error(f"Pulse processing error: {e}")
 
             in_pulse = False
 
@@ -579,15 +583,15 @@ def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
         else:
             iq_segment = np.array([])  # Пустой массив если данных нет
 
-        print(f"[RUN-EXTRACT] Buffer range: {oldest_available} to {newest_available}")
-        print(f"[RUN-EXTRACT] Requested range: {bp_start} to {bp_end}")
-        print(f"[RUN-EXTRACT] Effective range: {effective_start} to {effective_end}")
-        print(f"[RUN-EXTRACT] Extended segment with preamble: {iq_segment.size if hasattr(iq_segment, 'size') else len(iq_segment)} samples, preamble_samples={preamble_samples}")
+        log.debug(f"[RUN-EXTRACT] Buffer range: {oldest_available} to {newest_available}")
+        log.debug(f"[RUN-EXTRACT] Requested range: {bp_start} to {bp_end}")
+        log.debug(f"[RUN-EXTRACT] Effective range: {effective_start} to {effective_end}")
+        log.debug(f"[RUN-EXTRACT] Extended segment with preamble: {iq_segment.size if hasattr(iq_segment, 'size') else len(iq_segment)} samples, preamble_samples={preamble_samples}")
 
         if iq_segment.size > 0:
-            print(f"[PULSE] Extracted segment: {iq_segment.size} samples from buffer")
+            log.debug(f"[PULSE] Extracted segment: {iq_segment.size} samples from buffer")
         else:
-            print(f"[PULSE] Segment not available in buffer, using fallback")
+            log.debug("[PULSE] Segment not available in buffer, using fallback")
             iq_segment = iq_fallback if iq_fallback is not None else np.array([])
     else:
         iq_segment = iq_fallback if iq_fallback is not None else np.array([])
@@ -641,14 +645,14 @@ def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
 
         # Дополнительная отладочная информация
         if 'phase_data' in pulse_info and pulse_info['phase_data']:
-            print(f"[STATE] Using phase data from analyze_psk406: {len(STATE.phase_data)} points")
+            log.debug(f"[STATE] Using phase data from analyze_psk406: {len(STATE.phase_data)} points")
         else:
-            print(f"[STATE] No phase data from analyze_psk406()")
+            log.debug(f"[STATE] No phase data from analyze_psk406()")
 
-        print(f"[PULSE] Processed: {pulse_info['length_ms']:.1f}ms, PSK: {pulse_info.get('msg_ok', 'N/A')}")
+        log.info(f"Pulse processed: {pulse_info['length_ms']:.1f}ms, PSK: {pulse_info.get('msg_ok', 'N/A')}")
 
     except Exception as e:
-        print(f"[PULSE] Segment processing error: {e}")
+        log.error(f"Pulse segment processing error: {e}")
 
 def _find_pulse_segment(iq_data, sample_rate, thresh_dbm, win_ms, start_delay_ms, calib_db):
     """
@@ -718,14 +722,14 @@ def process_cf32_file(file_path):
             return {"error": "No pulse found"}
 
         # ДИАГНОСТИКА: Информация о сегменте перед обработкой
-        print(f"[FILE-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
-        print(f"[FILE-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
-        print(f"[FILE-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
+        log.debug(f"[FILE-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
+        log.debug(f"[FILE-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
+        log.debug(f"[FILE-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
 
         # ДИАГНОСТИКА: Информация о сегменте перед обработкой
-        print(f"[FILE-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
-        print(f"[FILE-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
-        print(f"[FILE-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
+        log.debug(f"[FILE-DIAG] Final segment: {len(iq_seg)} samples, baseline_ms={baseline_ms}")
+        log.debug(f"[FILE-DIAG] First 5 IQ values: {iq_seg[:5] if len(iq_seg) >= 5 else iq_seg}")
+        log.debug(f"[FILE-DIAG] IQ segment statistics: mean_abs={np.mean(np.abs(iq_seg)):.6f}, max_abs={np.max(np.abs(iq_seg)):.6f}")
 
         # Обрабатываем сигнал с помощью metrics
         pulse_result = process_psk_impulse(
@@ -762,18 +766,18 @@ def process_cf32_file(file_path):
         # Записываем edges[0] в файл для анализа
         edges_info = f"[FILE] edges[0] = {edges[0] if edges is not None and len(edges) > 0 else 'No edges'}"
         edges_info += f", Using default start_idx=25000, phase_data len = {len(pulse_result['phase_rad'])}"
-        print(edges_info)
+        log.debug(edges_info)
 
         # Извлекаем метрики из результата
         phase_data = pulse_result.get("phase_rad", [])
         xs_fm_ms = pulse_result.get("xs_ms", [])
 
-        print(f"DEBUG: phase_data length = {len(phase_data) if hasattr(phase_data, '__len__') else 0}")
-        print(f"DEBUG: xs_fm_ms length = {len(xs_fm_ms) if hasattr(xs_fm_ms, '__len__') else 0}")
+        log.debug(f"phase_data length = {len(phase_data) if hasattr(phase_data, '__len__') else 0}")
+        log.debug(f"xs_fm_ms length = {len(xs_fm_ms) if hasattr(xs_fm_ms, '__len__') else 0}")
         if isinstance(phase_data, np.ndarray) and phase_data.size > 0:
-            print(f"DEBUG: phase_data sample: min={np.min(phase_data):.3f}, max={np.max(phase_data):.3f}")
+            log.debug(f"phase_data sample: min={np.min(phase_data):.3f}, max={np.max(phase_data):.3f}")
         if isinstance(xs_fm_ms, np.ndarray) and xs_fm_ms.size > 0:
-            print(f"DEBUG: xs_fm_ms sample: min={np.min(xs_fm_ms):.3f}, max={np.max(xs_fm_ms):.3f}")
+            log.debug(f"xs_fm_ms sample: min={np.min(xs_fm_ms):.3f}, max={np.max(xs_fm_ms):.3f}")
 
         # Безопасное преобразование в список
         if isinstance(phase_data, np.ndarray):
@@ -804,8 +808,8 @@ def process_cf32_file(file_path):
         }
 
         # Если есть метрики фазы, добавляем их
-        print(f"DEBUG: phase_res type: {type(phase_res)}")
-        print(f"DEBUG: phase_res content: {phase_res}")
+        log.debug(f"phase_res type: {type(phase_res)}")
+        log.debug(f"phase_res content: {phase_res}")
         if phase_res is not None and (isinstance(phase_res, dict) or (hasattr(phase_res, '__len__') and len(phase_res) > 0)):
             # Частота дискретизации после децимации (как в test_cf32_to_phase_msg_FFT.py)
             FSd = sample_rate / 4.0
@@ -3684,14 +3688,14 @@ def api_status():
     fm_len = len(STATE.fm_data) if STATE.fm_data else 0
     fm_xs_len = len(STATE.fm_xs_ms) if STATE.fm_xs_ms else 0
 
-    print(f"[PHASE] samples={phase_len} time_ms={xs_ms_len} mode=API")
-    print(f"[FM]    samples={fm_len} time_ms={fm_xs_len}")
+    log.debug(f"[PHASE] samples={phase_len} time_ms={xs_ms_len} mode=API")
+    log.debug(f"[FM]    samples={fm_len} time_ms={fm_xs_len}")
 
     # Предупреждения о несоответствии длин
     if phase_len > 0 and xs_ms_len > 0 and phase_len != xs_ms_len:
-        print(f"WARNING: Phase data length mismatch! phase_data={phase_len} vs xs_ms={xs_ms_len}")
+        log.warning(f"Phase data length mismatch! phase_data={phase_len} vs xs_ms={xs_ms_len}")
     if fm_len > 0 and fm_xs_len > 0 and fm_len != fm_xs_len:
-        print(f"WARNING: FM data length mismatch! fm_data={fm_len} vs fm_xs_ms={fm_xs_len}")
+        log.warning(f"FM data length mismatch! fm_data={fm_len} vs fm_xs_ms={fm_xs_len}")
 
     return jsonify({
         'running': STATE.running,
@@ -3738,14 +3742,14 @@ def api_measure():
 
     # Инициализируем SDR если еще не инициализирован
     if not sdr_backend:
-        print("[Measure] Initializing SDR backend...")
+        log.info("Initializing SDR backend for measurement...")
         success = init_sdr_backend()
         if success:
-            print(f"[Measure] SDR initialized: {sdr_device_info}")
+            log.info(f"SDR initialized for measurement: {sdr_device_info}")
         else:
-            print(f"[Measure] SDR initialization failed: {sdr_device_info}")
+            log.warning(f"SDR initialization failed: {sdr_device_info}")
     else:
-        print(f"[Measure] SDR already initialized: {sdr_device_info}")
+        log.debug(f"SDR already initialized: {sdr_device_info}")
 
     # Возвращаем статус с информацией о SDR
     return jsonify({
@@ -3780,7 +3784,7 @@ def api_run():
         STATE.running = False
         # Фильтруем русские символы для избежания проблем с кодировкой
         error_msg = ''.join(c if ord(c) < 128 else '?' for c in str(e))
-        print(f"[RUN] Error: {error_msg}")
+        log.error(f"RUN error: {error_msg}")
         return jsonify({
             'status': 'error',
             'running': STATE.running,
@@ -3844,8 +3848,7 @@ def api_upload():
             "message": f"Loaded: {filename}"
         })
 
-        print(f"File uploaded: {filename} -> {file_path}")
-        print(f"File size: {os.path.getsize(file_path)} bytes")
+        log.info(f"File uploaded: {filename} -> {file_path}, size: {os.path.getsize(file_path)} bytes")
 
         # Обрабатываем загруженный файл
         processing_result = process_cf32_file(file_path)
@@ -3859,7 +3862,7 @@ def api_upload():
                 "message": f"Processed: {filename} - Message: {STATE.hex_message[:16]}..."
             })
 
-            print(f"File processed successfully: {len(STATE.phase_data)} phase samples, {len(STATE.xs_fm_ms)} time samples")
+            log.info(f"File processed: {len(STATE.phase_data)} phase samples, {len(STATE.xs_fm_ms)} time samples")
 
         else:
             error_msg = processing_result.get("error", "Unknown error")
@@ -3867,7 +3870,7 @@ def api_upload():
             update_state_from_results({
                 "message": f"Error processing {filename}: {error_msg}"
             })
-            print(f"Processing error: {error_msg}")
+            log.error(f"File processing error: {error_msg}")
 
         # Возвращаем правильный статус в зависимости от результата обработки
         if processing_result.get("success"):
@@ -3891,7 +3894,7 @@ def api_upload():
             }), 400
 
     except Exception as e:
-        print(f"Upload error: {e}")
+        log.error(f"Upload error: {e}")
         return jsonify({'error': str(e)}), 500
 
 # STRICT_COMPAT: Новые API endpoints
@@ -3966,8 +3969,8 @@ def api_last_pulse():
         })
 
 if __name__ == '__main__':
-    print(">>> Starting COSPAS/SARSAT Beacon Tester v2.1")
-    print(">>> Interface available at: http://127.0.0.1:8738/")
-    print(">>> SDR will be initialized on Measure button press")
-    print(">>> To stop: Ctrl+C")
+    log.info("Starting COSPAS/SARSAT Beacon Tester v2.1")
+    log.info("Interface available at: http://127.0.0.1:8738/")
+    log.info("SDR will be initialized on Measure button press")
+    log.info("To stop: Ctrl+C")
     app.run(host='127.0.0.1', port=8738, debug=True)

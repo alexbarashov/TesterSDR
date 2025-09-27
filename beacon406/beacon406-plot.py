@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -109,10 +111,10 @@ class SoapySlidingRMS:
         self.sample_rate = float(SAMPLE_RATE_SPS)
         if self.backend is not None:
             try:
-                print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+                log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
             except Exception:
                 try:
-                    print("\n=== BACKEND STATUS ===\n", self.backend.get_status(), "\n======================\n")
+                    log.info("\n=== BACKEND STATUS ===\n", self.backend.get_status(), "\n======================\n")
                 except Exception:
                     pass
             try:
@@ -123,7 +125,7 @@ class SoapySlidingRMS:
                 st.get("actual_sample_rate_sps",
                     getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
             )
-            print(f" Backends Sample Rate: {self.sample_rate:.2f} Sa/s")
+            log.info(f" Backends Sample Rate: {self.sample_rate:.2f} Sa/s")
         
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
         self.tail_p = np.empty(0, dtype=np.float32)
@@ -618,7 +620,7 @@ class SoapySlidingRMS:
     # ---------- UI callbacks ----------
     def _on_backend_select(self, _event, backend_name):
         """Переключает backend SDR."""
-        print(f"\n[INFO] Переключение на backend: {backend_name}")
+        log.info(f"\n[INFO] Переключение на backend: {backend_name}")
 
         # Если выбран file, сначала нужно выбрать файл
         if backend_name == "file":
@@ -636,7 +638,7 @@ class SoapySlidingRMS:
             root.destroy()
 
             if not file_path:
-                print("[INFO] Выбор файла отменён")
+                log.info("[INFO] Выбор файла отменён")
                 return
 
             device_args = {"path": file_path}
@@ -675,12 +677,12 @@ class SoapySlidingRMS:
                         _st.get("actual_sample_rate_sps",
                                 getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
                     )
-                    print(f"[INFO] Backend {backend_name} активирован. Sample Rate: {self.sample_rate:.2f} Sa/s")
-                    print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+                    log.info(f"[INFO] Backend {backend_name} активирован. Sample Rate: {self.sample_rate:.2f} Sa/s")
+                    log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
                 except Exception:
                     pass
             else:
-                print("[INFO] SDR не найден — режим ожидания файла (нажмите «Открыть»).")
+                log.info("[INFO] SDR не найден — режим ожидания файла (нажмите «Открыть»).")
 
             # … далее обнуление состояния как было …
 
@@ -703,10 +705,10 @@ class SoapySlidingRMS:
                     _st.get("actual_sample_rate_sps",
                             getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
                 )
-                print(f"[INFO] Backend {backend_name} активирован. Sample Rate: {self.sample_rate:.2f} Sa/s")
+                log.info(f"[INFO] Backend {backend_name} активирован. Sample Rate: {self.sample_rate:.2f} Sa/s")
 
                 # Печать статуса
-                print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+                log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
             except Exception:
                 pass
 
@@ -753,10 +755,10 @@ class SoapySlidingRMS:
             # Обновляем цвета кнопок
             self._update_backend_buttons(backend_name)
 
-            print(f"[INFO] Backend {backend_name} успешно активирован")
+            log.info(f"[INFO] Backend {backend_name} успешно активирован")
 
         except Exception as e:
-            print(f"[ERROR] Ошибка активации backend {backend_name}: {e}")
+            log.info(f"[ERROR] Ошибка активации backend {backend_name}: {e}")
             # Попытаемся вернуться к исходному backend
             self._restore_original_backend()
 
@@ -811,7 +813,7 @@ class SoapySlidingRMS:
 
     def _on_file_select(self, _event):
         """Открывает диалог выбора CF32 файла и перезагружает backend."""
-        print("\n[INFO] Нажата кнопка Файл")
+        log.info("\n[INFO] Нажата кнопка Файл")
 
         # Создаём скрытое tk окно для диалога
         root = tk.Tk()
@@ -830,10 +832,10 @@ class SoapySlidingRMS:
         root.destroy()
 
         if not file_path:
-            print("[INFO] Выбор файла отменён")
+            log.info("[INFO] Выбор файла отменён")
             return
 
-        print(f"[INFO] Выбран файл: {file_path}")
+        log.info(f"[INFO] Выбран файл: {file_path}")
 
         # Останавливаем текущий backend
         try:
@@ -865,10 +867,10 @@ class SoapySlidingRMS:
                     _st.get("actual_sample_rate_sps",
                             getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS))
                 )
-                print(f"[INFO] Новый файл загружен. Sample Rate: {self.sample_rate:.2f} Sa/s")
+                log.info(f"[INFO] Новый файл загружен. Sample Rate: {self.sample_rate:.2f} Sa/s")
 
                 # Печать статуса
-                print("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+                log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
             except Exception:
                 pass
 
@@ -912,10 +914,10 @@ class SoapySlidingRMS:
             self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
             self.reader_thread.start()
 
-            print(f"[INFO] Файл {file_path} успешно загружен и начат анализ")
+            log.info(f"[INFO] Файл {file_path} успешно загружен и начат анализ")
 
         except Exception as e:
-            print(f"[ERROR] Ошибка загрузки файла: {e}")
+            log.info(f"[ERROR] Ошибка загрузки файла: {e}")
             # Попытаемся вернуться к исходному backend
             try:
                 extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
@@ -941,7 +943,7 @@ class SoapySlidingRMS:
                 pass
 
     def _on_exit(self, _event):
-        print("\n[INFO] Нажата кнопка Выход")
+        log.info("\n[INFO] Нажата кнопка Выход")
         self.stop()
         plt.close(self.fig1)
         plt.close(self.fig2)
@@ -958,10 +960,10 @@ class SoapySlidingRMS:
             seg = None if self.last_iq_seg is None else self.last_iq_seg.copy()
             gate = None if self.last_core_gate is None else tuple(self.last_core_gate)
         if seg is None or seg.size < 8:
-            print("[WARN] Нет сегмента для спектра. Сначала должен быть обнаружен импульс.")
+            log.info("[WARN] Нет сегмента для спектра. Сначала должен быть обнаружен импульс.")
             return
         if not gate or gate[1] - gate[0] < 8:
-            print("[WARN] Нет валидного ядра импульса (gate). Спектр не построен.")
+            log.info("[WARN] Нет валидного ядра импульса (gate). Спектр не построен.")
             return
 
         self._plot_fft_sector(
@@ -989,7 +991,7 @@ class SoapySlidingRMS:
         except Exception:
             pass
         state = "выключено" if not self.pulse_updates_enabled else "включено"
-        print(f"[INFO] Обновление окна импульса/PSK: {state}")
+        log.info(f"[INFO] Обновление окна импульса/PSK: {state}")
 
     def _plot_fft_sector(self, 
         iq_data,
@@ -1037,7 +1039,7 @@ class SoapySlidingRMS:
                 seg = seg[i0:i1]
 
             if seg.size < 16:
-                print("Сегмент слишком короткий для FFT.")
+                log.info("Сегмент слишком короткий для FFT.")
                 return
 
             if remove_dc:
@@ -1075,7 +1077,7 @@ class SoapySlidingRMS:
             hw = abs(float(sector_half_width_hz))
             mask = (f_axis >= f0 - hw) & (f_axis <= f0 + hw)
             if not np.any(mask):
-                print("Сектор вне диапазона оси частот. Проверь sector_center_hz/sector_half_width_hz.")
+                log.info("Сектор вне диапазона оси частот. Проверь sector_center_hz/sector_half_width_hz.")
                 return
 
             f_sec = f_axis[mask]
@@ -1166,12 +1168,12 @@ class SoapySlidingRMS:
             data = self.last_iq_seg.copy() if self.last_iq_seg is not None else np.empty(0)
         
         if data.size == 0:
-            print("[WARN] Нет данных для сохранения. Сначала должен быть обнаружен импульс.")
+            log.info("[WARN] Нет данных для сохранения. Сначала должен быть обнаружен импульс.")
             return
         
         fname = time.strftime(file_path)
         data.astype(np.complex64).tofile(fname)  # CF32 bit-for-bit
-        print(f"[INFO] IQ-буфер импульса сохранён: {fname} ({data.size} сэмплов)")
+        log.info(f"[INFO] IQ-буфер импульса сохранён: {fname} ({data.size} сэмплов)")
 
     # ---------- SDR read & process ----------
     def _read_block(self, nsamps: int) -> np.ndarray:
@@ -1183,7 +1185,7 @@ class SoapySlidingRMS:
                     samples = self._read_block(READ_CHUNK)
                     if samples.size == 0:
                         if BACKEND_NAME == "file":
-                            print("[INFO] EOF (file): остановка.")
+                            log.info("[INFO] EOF (file): остановка.")
                             self.stop()
                             return  # или break
                         else:
@@ -1192,7 +1194,7 @@ class SoapySlidingRMS:
                             continue
 
                 except RuntimeError as e:
-                    print(f"\n[WARN] readStream: {e}")
+                    log.info(f"\n[WARN] readStream: {e}")
                     time.sleep(0.001)
                     continue
                 try:
@@ -1201,11 +1203,11 @@ class SoapySlidingRMS:
 
                 except Exception as e:
 
-                    print(f"\n[WARN] Обработка блока пропущена: {e}")
+                    log.info(f"\n[WARN] Обработка блока пропущена: {e}")
 
                     # продолжаем цикл, не останавливаем поток
         except Exception as e:
-            print(f"\nОШИБКА чтения: {e}")
+            log.info(f"\nОШИБКА чтения: {e}")
             self._stop = True
 
     def _append_samples(self, x: np.ndarray):
@@ -1480,7 +1482,7 @@ class SoapySlidingRMS:
 
                                     self.last_phase_metrics = _snapshot
                                     self.last_msg_hex = str(msg_hex)
-                                    #print("MsgS:",msg_hex)
+                                    #log.info("MsgS:",msg_hex)
                                     FSd = self.sample_rate/4
                                     phase_res = (
                                     f"Carrier={(edges[0]/FSd*1e3)}ms "
@@ -1521,12 +1523,14 @@ class SoapySlidingRMS:
 
         if PRINT_EVERY_N_SEC and (now - self.last_print) >= PRINT_EVERY_N_SEC:
             self.last_print = now
-            print(
-                f"RMS(last): {self.last_rms_dbm:7.2f} dBm | "
-                f"Freq(last impulse): {self.last_impulse_freq_hz/1000:.3f} kHz | "
-                f"win={self.win_samps} samp ({RMS_WIN_MS:.2f} ms) | "
-                f"CF={CENTER_FREQ_HZ/1e6:.6f} MHz | IF={IF_OFFSET_HZ:+} Hz",
-                end="\r", flush=True
+            log.debug(
+                "RMS(last): %7.2f dBm | Freq(last impulse): %.3f kHz | win=%d samp (%.2f ms) | CF=%.6f MHz | IF=%+d Hz",
+                self.last_rms_dbm,
+                self.last_impulse_freq_hz/1000,
+                self.win_samps,
+                RMS_WIN_MS,
+                CENTER_FREQ_HZ/1e6,
+                IF_OFFSET_HZ
             )
 
     # ---------- Plot updates ----------
@@ -1571,7 +1575,7 @@ class SoapySlidingRMS:
                         ys_len = 0
                         if pulse_data.get("ys") is not None:
                             ys_len = len(pulse_data["ys"])
-                        print(f"[IMPULSE] points={ys_len}")
+                        log.info(f"[IMPULSE] points={ys_len}")
 
                     if pulse_data["xs_ms"] is not None:
                         self.ln_pulse.set_data(pulse_data["xs_ms"], pulse_data["ys"])
@@ -1622,7 +1626,7 @@ class SoapySlidingRMS:
                 pass
 
 if __name__ == "__main__":
-    print("Запуск Sliding RMS + Pulse + PSK. Ctrl+C — выход. Есть кнопка 'Save IQ'.")
+    log.info("Запуск Sliding RMS + Pulse + PSK. Ctrl+C — выход. Есть кнопка 'Save IQ'.")
     analyzer = SoapySlidingRMS()
     try:
         analyzer.run()
@@ -1630,4 +1634,4 @@ if __name__ == "__main__":
         pass
     finally:
         analyzer.stop()
-        print("\nОстановлено.")
+        log.info("\nОстановлено.")

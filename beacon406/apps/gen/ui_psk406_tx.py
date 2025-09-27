@@ -1,11 +1,15 @@
-
 import json
-import threading
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from lib.logger import get_logger
+log = get_logger(__name__)
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import tkinter.font as tkfont  # добавь вверху файла рядом с остальными импортами
 
+sys.path.insert(0, str(Path(__file__).parent))  # Добавляем папку gen для локальных модулей
 import psk406_msg_gen as gen
 import backend_hackrf_tx as tx
 

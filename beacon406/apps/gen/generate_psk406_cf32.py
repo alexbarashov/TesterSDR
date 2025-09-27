@@ -1,6 +1,10 @@
 import numpy as np
-import time
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from lib.logger import get_logger
+log = get_logger(__name__)
+import time
 
 # === path hack (fixed to project root) ===
 def find_root(project_name: str) -> Path:
@@ -57,7 +61,7 @@ def save_psk406_iq(filename=FILE_PATH, sample_rate=1_000_000, bit_rate=400, pre_
     with open("carrier_check.txt", "w") as f:
         for i, sample in enumerate(carrier_samples[:10]):
             f.write(f"{i}: I = {sample.real:.6f}, Q = {sample.imag:.6f}\n")
-    print("✅ Первые 10 значений несущей записаны в carrier_check.txt")
+    log.info("✅ Первые 10 значений несущей записаны в carrier_check.txt")
     """
     
     # ---- PSK406 message ----
@@ -83,6 +87,6 @@ def save_psk406_iq(filename=FILE_PATH, sample_rate=1_000_000, bit_rate=400, pre_
     if peak > 0:
         iq /= peak
     iq.tofile(filename)
-    print(f"✅ Сигнал PSK406 сохранён в формате .cf32: {filename}")
+    log.info(f"✅ Сигнал PSK406 сохранён в формате .cf32: {filename}")
 
 save_psk406_iq()

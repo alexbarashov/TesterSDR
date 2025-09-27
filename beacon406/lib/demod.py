@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 # demod_psk_message.py
 import numpy as np
 
@@ -420,7 +422,7 @@ def demod_psk_msg(data):
     
     edges = detect_all_steps_by_mean(data, window=window, mean_diff_threshold=threshold, start_idx=start_idx) 
     if edges is None or len(edges) < 29:   # 28 интервалов = 29 фронтов
-        print(f"Недостаточно фронтов: {len(edges) if edges is not None else 0}")
+        log.warning("Недостаточно фронтов: %d", len(edges) if edges is not None else 0)
         #raise ValueError(f"Недостаточно фронтов: {len(edges) if edges is not None else 0}")
     
     # 2) Период по первым 28 фронтам

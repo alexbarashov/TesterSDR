@@ -1,4 +1,9 @@
 # save as make_multitone_156mhz.py
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from lib.logger import get_logger
+log = get_logger(__name__)
 import numpy as np
 
 # Параметры
@@ -33,5 +38,5 @@ iq_interleaved[1::2] = iq_q
 
 out_path = r"C:\work\TesterSDR\captures\multitone_156_025_075_9tones_10s_1Msps.iq"
 iq_interleaved.tofile(out_path)
-print("Saved:", out_path)
-print("Center for TX:", fc, "Hz")
+log.info("Saved:", out_path)
+log.info("Center for TX:", fc, "Hz")

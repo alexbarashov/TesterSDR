@@ -1,4 +1,9 @@
 # psk406_msg_gen.py
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from lib.logger import get_logger
+log = get_logger(__name__)
 import numpy as np
 
 def _dbfs_to_linear(dbfs: float) -> float:

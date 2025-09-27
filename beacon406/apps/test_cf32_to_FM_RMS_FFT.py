@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 """
 test_cf32_to_FM_RMS_FFT.py
 --------------------------

@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 # config_backend.py
 # Конфиг выбора SDR без правки основного кода/GUI.
 # Стиль путей по умолчанию: raw-строки + прямые слэши, как мы зафиксировали.

@@ -1,5 +1,7 @@
-# lib/sigio.py
 from __future__ import annotations
+# lib/sigio.py
+from lib.logger import get_logger
+log = get_logger(__name__)
 import os
 import json
 import math

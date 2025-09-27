@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 import numpy as np
 import matplotlib.pyplot as plt
 import os

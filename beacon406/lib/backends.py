@@ -1,19 +1,20 @@
-# 
+from __future__ import annotations
+#
 # backends.py
 # v1.1 (2025-09-18)
 # Единый тонкий адаптер для работы с разными SDR без правок основной логики анализа/GUI.
 # Идея: основной код получает только np.complex64 буферы через единый интерфейс.
 # Добавление нового SDR = +1 класс и регистрация в фабрике make_backend().
-# Проверены все SDR и file 
+# Проверены все SDR и file
 # в auto последовательность поиска rtl,hackrf,airspy,sdrplay,rsa (может быть потом добавить file)
-# Добавлен статус SDR 
+# Добавлен статус SDR
 # SDR работают со своим оптимальным SR (SAMPLE RATE) если он выше 1М идет простая децимация
-# например 1024 идет без децимации а 2Ms / 2  
+# например 1024 идет без децимации а 2Ms / 2
 # если ниже например RSA 825Ks идет без децимации (нужно проверить PSK /4 )
-# нужно оптимизировать работу с буфером сейчас алгоритмы разные у  RSA, AIRspy  
-# 
-
-from __future__ import annotations
+# нужно оптимизировать работу с буфером сейчас алгоритмы разные у  RSA, AIRspy
+#
+from lib.logger import get_logger
+log = get_logger(__name__)
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import numpy as np
@@ -171,8 +172,7 @@ class SoapyBackend(SDRBackend):
         self.actual_sample_rate_sps = float(self.sample_rate_hw / self.decim)
         
         if abs(fs_hw - fs_req) > 1e-3:
-            print(f"[INFO] {drv_key}: analysis Fs={fs_req/1e6:.2f} MS/s, "
-                  f"HW Fs={fs_hw/1e6:.2f} MS/s, decim={self.decim}")
+            log.info("%s: analysis Fs=%.2f MS/s, HW Fs=%.2f MS/s, decim=%d", drv_key, fs_req/1e6, fs_hw/1e6, self.decim)
 
         # Применяем частоту дискретизации
         self.dev.setSampleRate(self._SOAPY_SDR_RX, 0, self.sample_rate_hw)

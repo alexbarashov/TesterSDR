@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 # processing_PSK.py — LPF/decim for PSK 406, toggleable
 # этот алгоритм не оптимизирован и у него есть выравнивание по фазе 
 # не понятно насколько это плохо для анализа CS 406PSK...

@@ -1,3 +1,5 @@
+from lib.logger import get_logger
+log = get_logger(__name__)
 # plot_bin_f32_front.py
 import numpy as np
 import matplotlib.pyplot as plt

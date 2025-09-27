@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # epirb_hex_decoder.py
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from lib.logger import get_logger
+log = get_logger(__name__)
 # Использует библиотеку hex_decoder для декодирования EPIRB сообщений
 # Отображает результаты в окне Matplotlib
-
-import sys
 import os
 import argparse
 import matplotlib.pyplot as plt
@@ -106,11 +109,11 @@ def main():
     # Выбираем сообщение для декодирования
     if args.example:
         hex_message = HEX_EXAMPLES[args.example]
-        print(f"Используется пример '{args.example}': {hex_message}")
+        log.info("Используется пример '%s': %s", args.example, hex_message)
     else:
         hex_message = args.hex
         if hex_message == DEFAULT_HEX:
-            print(f"Используется сообщение по умолчанию: {hex_message}")
+            log.info("Используется сообщение по умолчанию: %s", hex_message)
 
     # Отображаем окно с декодированными параметрами
     show_epirb_params_window(hex_message)

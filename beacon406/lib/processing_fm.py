@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 processing_FM.py — универсальный частотный дискриминатор для IQ-последовательностей.
 
@@ -21,7 +22,8 @@ processing_FM.py — универсальный частотный дискри�
 
 Автор: ChatGPT (GPT-5 Thinking)
 """
-from __future__ import annotations
+from lib.logger import get_logger
+log = get_logger(__name__)
 from dataclasses import dataclass
 import numpy as np
 
@@ -256,6 +258,6 @@ if __name__ == "__main__":
         smooth_hz=2_000,
         detrend=True, center=True,
     )
-    print(out["title"])
-    print("fs_out:", out["fs_out"]) 
-    print("freq stats (Hz): mean=%.1f, std=%.1f" % (float(np.mean(out["freq_hz"])), float(np.std(out["freq_hz"])) ))
+    log.info(out["title"])
+    log.info("fs_out: %s", out["fs_out"]) 
+    log.info("freq stats (Hz): mean=%.1f, std=%.1f", float(np.mean(out["freq_hz"])), float(np.std(out["freq_hz"])))
