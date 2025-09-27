@@ -906,7 +906,7 @@ class BeaconState:
     hex_message: str = ""  # HEX сообщение из загруженного файла
     current_file: str = ""  # Путь к текущему загруженному файлу
     phase_data: list = field(default_factory=list)  # Данные фазы для графика
-    xs_fm_ms: list = field(default_factory=list)  # Временная шкала для графика фазы
+    xs_fm_ms: list = field(default_factory=list)  # Временная шкала для FM (deprecated, используйте fm_xs_ms)
     fm_data: list = field(default_factory=list)  # Данные FM частоты для графика
     fm_xs_ms: list = field(default_factory=list)  # Временная шкала для FM графика
 
@@ -1918,12 +1918,20 @@ HTML_PAGE = """
             // График данных
             if (data) {
                 let phaseData = (data.phase_data || []).map(v => Number(v));
-                let xsData = (data.xs_fm_ms || []).map(v => Number(v));
+                let xsData = (data.xs_ms || []).map(v => Number(v));  // Исправлено: xs_ms для фазы
 
                 // Нормализация времени: если максимум < 10, значит это секунды → переводим в мс
                 if (xsData.length && xsData.reduce((max, v) => Math.max(max, v), -Infinity) <= 10) {
-                    console.warn('DEBUG: xs_fm_ms appears to be in seconds — converting to ms');
+                    console.warn('DEBUG: xs_ms appears to be in seconds — converting to ms');
                     xsData = xsData.map(v => v * 1000);
+                }
+
+                // Проверка длин массивов (fail-soft protection)
+                if (phaseData.length !== xsData.length) {
+                    console.error(`Phase data mismatch: phase_data=${phaseData.length} vs xs_ms=${xsData.length}`);
+                    const statusEl = document.querySelector('.status-bar') || document.body;
+                    statusEl.innerHTML += '<div style="background: #ffeaa7; color: #d63031; padding: 5px; margin: 2px;">⚠️ Phase data mismatch (' + phaseData.length + ' vs ' + xsData.length + ')</div>';
+                    return; // Не рисуем "кривой" график
                 }
 
                 console.log('DEBUG drawChart: phaseData length =', phaseData.length);
@@ -3679,6 +3687,21 @@ def api_status():
                 latest_pulse_info = temp_queue[-1]
         except:
             pass
+
+    # Backend sanity checks для array lengths (ТЗ 250927-3)
+    phase_len = len(STATE.phase_data) if STATE.phase_data else 0
+    xs_ms_len = len(STATE.xs_ms) if STATE.xs_ms else 0
+    fm_len = len(STATE.fm_data) if STATE.fm_data else 0
+    fm_xs_len = len(STATE.fm_xs_ms) if STATE.fm_xs_ms else 0
+
+    print(f"[PHASE] samples={phase_len} time_ms={xs_ms_len} mode=API")
+    print(f"[FM]    samples={fm_len} time_ms={fm_xs_len}")
+
+    # Предупреждения о несоответствии длин
+    if phase_len > 0 and xs_ms_len > 0 and phase_len != xs_ms_len:
+        print(f"WARNING: Phase data length mismatch! phase_data={phase_len} vs xs_ms={xs_ms_len}")
+    if fm_len > 0 and fm_xs_len > 0 and fm_len != fm_xs_len:
+        print(f"WARNING: FM data length mismatch! fm_data={fm_len} vs fm_xs_ms={fm_xs_len}")
 
     return jsonify({
         'running': STATE.running,
