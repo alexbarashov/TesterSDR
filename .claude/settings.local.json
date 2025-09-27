@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"\n# Test FM integration syntax check\nimport sys\nsys.path.insert(0, ''beacon406'')\ntry:\n    from lib.processing_fm import fm_discriminator\n    import numpy as np\n    \n    # Create test IQ data (correct syntax)\n    iq_test = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex64)\n    \n    print(''Python 3.9 FM import and syntax: OK'')\n    print(''fm_discriminator function available'')\nexcept Exception as e:\n    print(''Error:'', e)\n\")",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(del edges_*.txt edges_*.json file_*.txt file_*.json final_*.txt final_*.json measure_*.txt measure_*.json preamble_*.txt run_*.txt run_*.json upload_*.json error.txt)"
     ],
     "deny": [],
     "ask": []

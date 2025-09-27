@@ -1,9 +1,0 @@
-{
-  "error": "Processing failed: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()",
-  "filename": "psk406msg_f75.cf32",
-  "message": "Error processing psk406msg_f75.cf32: Processing failed: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()",
-  "path": "C:\\work\\TesterSDR\\beacon406\\..\\captures\\uploads\\psk406msg_f75.cf32",
-  "processed": false,
-  "size": 4560000,
-  "status": "error"
-}

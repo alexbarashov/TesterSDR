@@ -39,4 +39,29 @@ captures/
 log.txt
 console.txt
 
+# Временные файлы отладки
+*_debug.txt
+*_error.txt
+*_result.json
+*_test.json
+*_status.json
+edges_*.txt
+edges_*.json
+file_*.txt
+file_*.json
+final_*.txt
+final_*.json
+measure_*.txt
+measure_*.json
+preamble_*.txt
+run_*.txt
+run_*.json
+upload_*.json
+error.txt
+fix_*.py
+activate_*.py
+test_*.py
+*_backup.py
+*_patch.py
+
 /.claude/
