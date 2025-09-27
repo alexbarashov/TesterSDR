@@ -21,7 +21,13 @@
       "Bash(git add:*)",
       "Bash(git push:*)",
       "Bash(set IQ_FILE_PATH=../captures/psk406msg_f75.cf32)",
-      "Bash(chcp:*)"
+      "Bash(chcp:*)",
+      "Bash(stop_flask.bat)",
+      "Bash(tee:*)",
+      "Bash(timeout 3 sleep 2)",
+      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"import beacon406.beacon_tester_web; print(''Import successful'')\")",
+      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"import beacon_tester_web; print(''Import successful with Python 3.9'')\")",
+      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" beacon406/beacon_tester_web.py)"
     ],
     "deny": [],
     "ask": []

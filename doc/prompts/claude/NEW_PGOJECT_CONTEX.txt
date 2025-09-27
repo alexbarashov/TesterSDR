@@ -1,0 +1,404 @@
+# ТЗ для Claude: «Декомпозиция `beacon_tester_web.py` в новый проект»
+
+## Общие требования (STRICT_COMPAT)
+
+* Только **аддитивные** изменения: функциональность и публичные имена/поведение не ломать.
+* Делать работу **этапами**; после каждого этапа проект должен запускаться и выполнять прежние функции.
+* Любые «магические числа» выносить в `cfg/config.py`, но без изменения смысловых значений.
+* Никаких фоновых «умных оптимизаций» — только рефакторинг разбиением.
+* Используем Windows/PowerShell-команды в примерах.
+
+## Целевая структура проекта
+
+```
+BeaconTesterWeb/
+  app/
+    __init__.py          # создание Flask-приложения (фабрика)
+    routes.py            # HTTP endpoints
+    templates/
+      index.html         # вынесенный HTML
+    static/
+      app.css
+      app.js
+  core/
+    ring_buffer.py       # IQRingBuffer
+    sdr_runner.py        # init/start/stop SDR, reader loop, detect_pulses
+    analyze_psk.py       # analyze_psk406(), process_pulse_segment()
+    rms.py               # utils для RMS и порогов (если есть)
+  io/
+    cf32_io.py           # _find_pulse_segment, process_cf32_file()
+    sigmf_io.py          # заготовка под SigMF (позже)
+  cfg/
+    config.py            # все константы/параметры
+  lib/                   # существующая папка lib/ (если есть) — просто перенести как есть
+  main.py                # точка входа (flask run)
+  requirements.txt
+  README.md
+```
+
+## Стартовые условия
+
+* Исходник: один файл `beacon_tester_web.py` (уже рабочий).
+* Новая папка проекта: `C:\work\BeaconTesterWeb\` (можно изменить путь, но держать единообразно в инструкциях).
+* Интерпретатор Python 3.9+.
+
+---
+
+## Этап 0 — Подготовка репозитория
+
+**Задача**
+
+1. Создай папку проекта и инициализируй Git.
+2. Скопируй текущий `beacon_tester_web.py` внутрь (как референс).
+3. Создай `requirements.txt` (минимум: Flask + то, что реально импортируется в файле).
+
+**Команды (PowerShell)**
+
+```powershell
+mkdir C:\work\BeaconTesterWeb
+cd C:\work\BeaconTesterWeb
+git init
+copy C:\work\TesterSDR\beacon_tester_web.py .\beacon_tester_web.py
+ni .\requirements.txt -ItemType File
+```
+
+**В `requirements.txt` (первый набросок)**
+
+```
+Flask>=2.2
+numpy
+scipy
+```
+
+*(если в исходнике есть иные зависимости — добавить их сюда позже)*
+
+**Acceptance criteria**
+
+* `git status` показывает новый репозиторий.
+* Файл `beacon_tester_web.py` на месте.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "chore: init repo with original beacon_tester_web.py and requirements"
+```
+
+---
+
+## Этап 1 — Скелет новой структуры и точка входа
+
+**Задача**
+
+1. Создай папки `app/`, `core/`, `io/`, `cfg/`, `lib/`, `app/templates/`, `app/static/`.
+2. Создай минимальные файлы `app/__init__.py`, `app/routes.py`, `main.py`, `cfg/config.py`, `README.md`.
+3. На этом этапе **приложение должно запускаться** и отдавать простую страницу “OK”.
+
+**Минимальные содержимые**
+
+`app/__init__.py`
+
+```python
+from flask import Flask
+
+def create_app():
+    app = Flask(__name__)
+    # позже: конфиги/регистрация блюпринтов
+    return app
+```
+
+`app/routes.py`
+
+```python
+from flask import Blueprint
+
+bp = Blueprint("main", __name__)
+
+@bp.get("/")
+def index():
+    return "Beacon Tester Web — OK"
+```
+
+`main.py`
+
+```python
+from app import create_app
+from app.routes import bp
+
+app = create_app()
+app.register_blueprint(bp)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
+```
+
+`cfg/config.py`
+
+```python
+# Все константы/параметры будем переносить сюда постепенно.
+TARGET_SIGNAL_HZ = 406_037_000  # пример
+```
+
+`README.md`
+
+````markdown
+# BeaconTesterWeb
+
+Refactor of monolithic `beacon_tester_web.py` into a modular Flask + DSP project.
+
+## Dev
+```bash
+pip install -r requirements.txt
+python main.py
+````
+
+````
+
+**Acceptance criteria**
+- `python main.py` поднимает Flask и открывается `http://127.0.0.1:5000/` со строкой “Beacon Tester Web — OK”.
+- Коммит:
+```powershell
+git add .
+git commit -m "feat: project skeleton with Flask app and basic route"
+````
+
+---
+
+## Этап 2 — Вынести IQRingBuffer
+
+**Задача**
+
+1. Найти класс `IQRingBuffer` в исходнике `beacon_tester_web.py`.
+2. Без изменений логики перенести его в `core/ring_buffer.py`.
+3. Временный импорт: в `beacon_tester_web.py` заменить определение класса на `from core.ring_buffer import IQRingBuffer`.
+4. Убедиться, что текущий запуск не ломается (даже если буфер пока не используется).
+
+`core/ring_buffer.py`
+
+```python
+# Вставить сюда класс IQRingBuffer «как есть» из исходника.
+# Если есть зависимые утилиты рядом — временно продублировать здесь или аккуратно импортировать.
+```
+
+**Acceptance criteria**
+
+* Импорт проходит: `python -c "from core.ring_buffer import IQRingBuffer; print('ok')"` выводит ok.
+* Старый файл продолжает запускаться (если он у вас пока основной).
+* Коммит:
+
+```powershell
+git add .
+git commit -m "refactor(core): extract IQRingBuffer to core/ring_buffer.py (STRICT_COMPAT)"
+```
+
+---
+
+## Этап 3 — Вынести анализ импульсов (PSK)
+
+**Задача**
+
+1. Перенести из исходника функции анализа PSK: `analyze_psk406(...)`, `process_pulse_segment(...)` → `core/analyze_psk.py`.
+2. Все параметры семплинга/порогов временно передавать аргументами (или импортировать из `cfg/config.py`), **не меняя** поведение.
+3. В старом файле заменить их определение на импорт:
+
+   ```python
+   from core.analyze_psk import analyze_psk406, process_pulse_segment
+   ```
+
+`core/analyze_psk.py`
+
+```python
+# Перенести функции «как есть».
+# Если есть внутренние хелперы — перенести вместе.
+# Внешних импортов от Flask быть не должно.
+```
+
+**Acceptance criteria**
+
+* Импорт функций работает.
+* Если в исходнике есть ручные вызовы анализа — они должны отрабатывать без изменения результатов.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "refactor(core): extract analyze_psk406/process_pulse_segment to core/analyze_psk.py"
+```
+
+---
+
+## Этап 4 — Вынести SDR цикл
+
+**Задача**
+
+1. Перенести `init_sdr_backend`, `start_sdr_capture`, `stop_sdr_capture`, `sdr_reader_loop`, `process_samples_realtime`, `detect_pulses` → `core/sdr_runner.py`.
+2. Все зависимости на Flask убрать: модуль **не должен** импортировать Flask.
+3. Константы (размеры окон, пороги) — временно взять из `cfg/config.py`.
+4. В исходнике оставить импорт:
+
+   ```python
+   from core.sdr_runner import (
+       init_sdr_backend, start_sdr_capture, stop_sdr_capture,
+       sdr_reader_loop, process_samples_realtime, detect_pulses
+   )
+   ```
+
+`core/sdr_runner.py`
+
+```python
+# Вставить функции «как есть», только переназначить импорты и конфиги.
+# Не менять публичные имена/сигнатуры (STRICT_COMPAT).
+```
+
+**Acceptance criteria**
+
+* Текущие маршруты/кнопки, которые дергают SDR-логику, продолжают работать как раньше.
+* Нет циклических импортов.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "refactor(core): extract SDR runner and realtime pipeline to core/sdr_runner.py"
+```
+
+---
+
+## Этап 5 — Вынести файловый ввод/вывод (cf32)
+
+**Задача**
+
+1. Перенести `_find_pulse_segment`, `process_cf32_file` → `io/cf32_io.py`.
+2. В исходнике заменить определение на:
+
+   ```python
+   from io.cf32_io import _find_pulse_segment, process_cf32_file
+   ```
+3. Создать заготовку `io/sigmf_io.py` (пока только шапка и TODO).
+
+`io/cf32_io.py`
+
+```python
+# Перенести «как есть», оставить тот же внешний интерфейс.
+```
+
+`io/sigmf_io.py`
+
+```python
+# TODO: SigMF read/write (этап позже)
+```
+
+**Acceptance criteria**
+
+* Чтение/поиск импульсов из cf32 работает как раньше.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "refactor(io): extract cf32 file I/O to io/cf32_io.py; add SigMF stub"
+```
+
+---
+
+## Этап 6 — Вынести Flask-слой полностью
+
+**Задача**
+
+1. Вырезать из `beacon_tester_web.py` все Flask-маршруты в `app/routes.py`.
+2. Перенести HTML-шаблон в `app/templates/index.html` (если он был inline-строкой).
+3. Скрипты/стили — в `app/static/app.js`, `app/static/app.css`.
+4. Зарегистрировать блюпринт в `main.py` (уже сделано ранее).
+5. Все обращения из роутов к логике — через импорт `core/*` и `io/*`.
+
+`app/templates/index.html` (минимум)
+
+```html
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>COSPAS/SARSAT Beacon Tester — TesterSDR</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div id="app">Loading...</div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
+```
+
+**Acceptance criteria**
+
+* `python main.py` запускает веб-интерфейс, страница рендерится из шаблона, API-эндпоинты на месте.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "refactor(app): move Flask routes to app/routes.py and template/static to app/"
+```
+
+---
+
+## Этап 7 — Консолидация конфигов
+
+**Задача**
+
+1. Собрать все «магические числа» (частоты, размеры буфера, пороги) в `cfg/config.py`.
+2. Во всех местах заменить литералы на импорт `from cfg.config import ...`.
+3. Ничего не менять по смыслу — только источник значений.
+
+**Acceptance criteria**
+
+* Приложение работает неизменно; значения читаются из `cfg/config.py`.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "chore(cfg): centralize constants and thresholds in cfg/config.py"
+```
+
+---
+
+## Этап 8 — Уборка «хвостов»
+
+**Задача**
+
+1. Удалить из корня старый `beacon_tester_web.py`, если в нём не осталось кода (или оставить как `legacy/` копию для истории).
+2. Обновить `README.md` с актуальными командами запуска/структурой.
+3. Добавить `requirements.txt` точнее (версии пакетов), если определены.
+
+**Acceptance criteria**
+
+* Запуск строго через `python main.py`.
+* В `README.md` отражены структура и этапы.
+* Коммит:
+
+```powershell
+git add .
+git commit -m "chore: finalize split; remove legacy monolith; update README and requirements"
+```
+
+---
+
+## Проверка после каждого этапа (чек-лист)
+
+* [ ] `git status` чистый, все изменения закоммичены.
+* [ ] `python -m compileall .` проходит без ошибок.
+* [ ] `python main.py` — открывается главная страница.
+* [ ] Ключевые маршруты/API отвечают (путинги, если есть).
+* [ ] Если SDR доступен — краткий «дымовый тест» чтения/цикла.
+
+---
+
+## Дополнительно (опциональные микрошаги)
+
+* Добавить `tests/` и хотя бы smoke-тесты импорта модулей.
+* В `core/rms.py` выделить нормализацию, dB10, окна — если они пока вросли в код.
+* В `io/sigmf_io.py` реализовать запись/чтение SigMF (используя `sigmf-python`), **но** это вынести в отдельный PR/этап.
+
+---
+
+## Итог
+
+В результате у нас модульная архитектура без поломок, где веб-слой (`app/*`) 
+не зависит от внутренностей DSP, а ядро (`core/*`, `io/*`) не знает про Flask. 
+Вся конфигурация — в `cfg/config.py`. Любая дальнейшая доработка (добавить FM/PSK демодуляцию, 
+улучшить буферы, записывать SigMF) — «аддитивна» и локальна.
+

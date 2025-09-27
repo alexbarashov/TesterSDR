@@ -1,0 +1,204 @@
+# ТЗ: Унификация проброса параметров сигнала в UI (File ⇄ Run)
+
+## Цель
+
+1. Гарантировать, что **одинаковый набор метрик** (включая `preamble_ms`) вычисляется и попадает в UI **в обоих режимах**.
+2. Убрать дублирование логики проброса в `STATE` и сделать единый, безопасный к STRICT_COMPAT способ обновления.
+
+---
+
+## Требования по STRICT_COMPAT
+
+* Архитектуру не ломать; только **аддитивные** изменения.
+* Имена существующих ключей JSON и типов **не менять**.
+* Вводим унифицированный путь обновления `STATE` без удаления текущих.
+
+---
+
+## Единый контракт данных (result/pulse_info)
+
+Все ветки анализа (офлайн-файл и потоковый импульс) обязаны возвращать **одинаковую** структуру результата с ключами ниже (отсутствующие значения — `None`, а не пропуск поля):
+
+### Тайминги/границы
+
+* `preamble_ms: float | None` — время до первого фронта: `edges[0] / (fs/4) * 1000.0`
+* `total_ms: float | None` — длительность посылки
+* `prise_ms: float | None` — (если используется) длительность участка подъёма до измерений
+
+### Фаза и фронты
+
+* `pos_phase: float | None`
+* `neg_phase: float | None`
+* `ph_rise: float | None`
+* `ph_fall: float | None`
+* `symmetry_pct: float | None`  (если есть)
+
+### Сигнальные/общие
+
+* `rms_dbm: float | None`
+* `freq_hz: float | None`
+* `bitrate_bps: float | None`
+* `t_mod: float | None`  (если у вас так называется метрика длительности модуляции)
+
+### Декодированное сообщение
+
+* `hex_message: str | None`
+
+### Графики (если формируются)
+
+* `phase_data: list[float] | None`
+* `xs_ms: list[float] | None`
+* (для FM/других окон — их поля по текущим именам)
+
+> Примечание: если какое-то поле в конкретном режиме не вычисляете — **верните `None`**, но **не опускайте ключ**.
+
+---
+
+## Единый слой проброса в STATE
+
+Создать **утилиту** (одну функцию) и использовать её и в File, и в Run:
+
+```python
+def update_state_from_results(res: dict) -> None:
+    # безопасные присваивания только если ключ присутствует (можно и None)
+    if "preamble_ms" in res: STATE.preamble_ms = res["preamble_ms"]
+    if "total_ms"   in res: STATE.total_ms   = res["total_ms"]
+    if "prise_ms"   in res: STATE.prise_ms   = res["prise_ms"]
+
+    if "pos_phase"     in res: STATE.pos_phase     = res["pos_phase"]
+    if "neg_phase"     in res: STATE.neg_phase     = res["neg_phase"]
+    if "ph_rise"       in res: STATE.ph_rise       = res["ph_rise"]
+    if "ph_fall"       in res: STATE.ph_fall       = res["ph_fall"]
+    if "symmetry_pct"  in res: STATE.symmetry_pct  = res["symmetry_pct"]
+
+    if "rms_dbm"     in res: STATE.rms_dbm     = res["rms_dbm"]
+    if "freq_hz"     in res: STATE.freq_hz     = res["freq_hz"]
+    if "bitrate_bps" in res: STATE.bitrate_bps = res["bitrate_bps"]
+    if "t_mod"       in res: STATE.t_mod       = res["t_mod"]
+
+    if "hex_message" in res: STATE.hex_message = res["hex_message"]
+
+    # графики — по текущим именам, без переименований
+    if "phase_data" in res: STATE.phase_data = res["phase_data"]
+    if "xs_ms"      in res: STATE.xs_ms      = res["xs_ms"]
+    # (если есть fm-графики — аналогично)
+```
+
+### Где вызывать
+
+* **File путь** (после офлайн-анализа файла): сразу после получения `result` вызвать `update_state_from_results(result)`.
+* **Run путь** (внутри `process_pulse_segment(...)`): после `pulse_info.update(psk_result)` вызвать `update_state_from_results(pulse_info)`.
+
+> Важно: **не** дублировать ручные присваивания `STATE.xxx = ...` рядом — используем единый вызов.
+
+---
+
+## Инициализация STATE (чтобы ключи всегда были в /api/status)
+
+При старте приложения один раз проинициализировать поля (если не было):
+
+```python
+# минимальный набор, можно расширить вашим списком
+STATE.preamble_ms = None
+STATE.total_ms    = None
+STATE.prise_ms    = None
+
+STATE.pos_phase    = None
+STATE.neg_phase    = None
+STATE.ph_rise      = None
+STATE.ph_fall      = None
+STATE.symmetry_pct = None
+
+STATE.rms_dbm     = None
+STATE.freq_hz     = None
+STATE.bitrate_bps = None
+STATE.t_mod       = None
+
+STATE.hex_message = None
+
+STATE.phase_data = None
+STATE.xs_ms      = None
+# (и прочие, если UI их ждёт)
+```
+
+---
+
+## /api/status
+
+* Ничего **не вычисляет**: только возвращает значения из `STATE`.
+* Убедиться, что все ключи выше **всегда присутствуют** в JSON (значения могут быть `null`).
+
+---
+
+## Верификация расчёта `preamble_ms`
+
+* Формула в обеих ветках одинакова: `edges[0] / (fs/4) * 1000.0`.
+* Если `edges` нет или пуст, вернуть `preamble_ms = None`.
+* Короткий debug-лог в месте присвоения: `"[PSK] preamble_ms=%.3f"` при наличии значения. Без спама.
+
+---
+
+## Псевдо-патч (ориентиры)
+
+**1) Общая утилита**
+
+```python
+# somewhere in a shared module
+def update_state_from_results(res):
+    # (см. блок выше)
+    ...
+```
+
+**2) File-ветка**
+
+```python
+result = analyze_psk406_from_file(path, fs, ...)  # как сейчас
+update_state_from_results(result)
+```
+
+**3) Run-ветка**
+
+```python
+psk_result = analyze_psk406(iq_seg, fs, ...)  # как сейчас
+pulse_info.update(psk_result)
+update_state_from_results(pulse_info)
+```
+
+---
+
+## Тест-план
+
+### 1) Паритет File vs Run (тот же сигнал)
+
+* Взять один и тот же фрагмент `*.cf32`.
+* **File**: прогнать офлайн → запросить `/api/status` → сохранить JSON A.
+* **Run** (backend=file или через кольцевой буфер): дождаться детекции → `/api/status` → сохранить JSON B.
+* Сравнить A и B по ключам:
+
+  * `preamble_ms` — в пределах нескольких мс (разница из-за границ вырезки).
+  * Остальные: `pos_phase, neg_phase, ph_rise, ph_fall, symmetry_pct, total_ms, prise_ms, rms_dbm, freq_hz, bitrate_bps, t_mod, hex_message` — должны быть либо равны, либо оба `null`.
+
+### 2) «Пустой» сигнал
+
+* Подать шум/тишину.
+* `/api/status` должен вернуть все ключи, большинство — `null`. Никаких исключений.
+
+### 3) Регресс UI
+
+* Проверить, что UI корректно отображает параметры в обоих режимах, ключи присутствуют всегда.
+* Графики (если рисуются) по-прежнему приходят в тех же полях.
+
+### 4) Производительность/логирование
+
+* Проверить, что новый слой не добавляет ощутимых задержек.
+* Логи — только единичные debug-сообщения при расчёте преамбулы/анализа.
+
+---
+
+## Критерии приёмки
+
+* `/api/status` возвращает **одинаковый набор ключей** в обоих режимах.
+* Значения для одного и того же входного файла **согласованы** между File и Run.
+* Никакие старые ключи/типы не переименованы и не удалены.
+* Код остаётся совместимым со STRICT_COMPAT: добавлены утилита и вызовы, без разрушения существующей логики.
+

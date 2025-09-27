@@ -1,0 +1,11 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0 99 4453k    0     0  100 4453k      0  6227k --:--:-- --:--:-- --:--:-- 6219k100 4453k  100   266  100 4453k    371  6227k --:--:-- --:--:-- --:--:-- 6220k{
+  "filename": "psk406msg_f75.cf32",
+  "message": "Processed: psk406msg_f75.cf32 - Message: FFFED08002000000...",
+  "path": "C:\\work\\TesterSDR\\beacon406\\..\\captures\\uploads\\psk406msg_f75.cf32",
+  "processed": true,
+  "size": 4560000,
+  "status": "success"
+}
+

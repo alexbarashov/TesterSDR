@@ -615,26 +615,11 @@ def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
         global pulse_history
         pulse_history.append(pulse_info.copy())
 
-        # STRICT_COMPAT: Обновляем STATE для совместимости со старым интерфейсом
-        if 'msg_hex' in pulse_info and pulse_info['msg_hex']:
-            STATE.hex_message = pulse_info['msg_hex']
+        # STRICT_COMPAT: Используем единую утилиту для обновления STATE
+        update_state_from_results(pulse_info)
 
-        # Обновляем PSK метрики в STATE
-        if pulse_info.get('pos_phase') is not None:
-            STATE.pos_phase = pulse_info['pos_phase']
-        if pulse_info.get('neg_phase') is not None:
-            STATE.neg_phase = pulse_info['neg_phase']
-        if pulse_info.get('ph_rise') is not None:
-            STATE.ph_rise = pulse_info['ph_rise']
-        if pulse_info.get('ph_fall') is not None:
-            STATE.ph_fall = pulse_info['ph_fall']
-        if pulse_info.get('symmetry_pct') is not None:
-            STATE.symmetry_pct = pulse_info['symmetry_pct']
-
-        # Используем уже обработанные данные из analyze_psk406() вместо повторной обработки
+        # Дополнительная отладочная информация
         if 'phase_data' in pulse_info and pulse_info['phase_data']:
-            STATE.phase_data = pulse_info['phase_data']
-            STATE.xs_fm_ms = pulse_info.get('xs_ms', [])
             print(f"[STATE] Using phase data from analyze_psk406: {len(STATE.phase_data)} points")
         else:
             print(f"[STATE] No phase data from analyze_psk406()")
@@ -931,6 +916,88 @@ class BeaconState:
 
 
 STATE = BeaconState()
+
+def update_state_from_results(res: dict) -> None:
+    """Единая утилита для обновления STATE из результатов обработки (File/Run).
+
+    STRICT_COMPAT: Безопасные присваивания только если ключ присутствует.
+    Это гарантирует паритет между File и Run режимами.
+    """
+    # Тайминги/границы
+    if "preamble_ms" in res: STATE.preamble_ms = res["preamble_ms"]
+    if "total_ms" in res: STATE.total_ms = res["total_ms"]
+    if "prise_ms" in res: STATE.prise_ms = res["prise_ms"]
+
+    # Фаза и фронты
+    if "pos_phase" in res: STATE.pos_phase = res["pos_phase"]
+    if "neg_phase" in res: STATE.neg_phase = res["neg_phase"]
+    if "ph_rise" in res: STATE.ph_rise = res["ph_rise"]
+    if "ph_fall" in res: STATE.ph_fall = res["ph_fall"]
+    if "symmetry_pct" in res: STATE.symmetry_pct = res["symmetry_pct"]
+    if "asymmetry" in res: STATE.asymmetry = res["asymmetry"]
+
+    # Сигнальные/общие
+    if "rms_dbm" in res: STATE.rms_dbm = res["rms_dbm"]
+    if "freq_hz" in res: STATE.freq_hz = res["freq_hz"]
+    if "bitrate_bps" in res: STATE.bitrate_bps = res["bitrate_bps"]
+    if "t_mod" in res: STATE.t_mod = res["t_mod"]
+    if "p_wt" in res: STATE.p_wt = res["p_wt"]
+
+    # Декодированное сообщение
+    if "hex_message" in res: STATE.hex_message = res["hex_message"]
+    if "msg_hex" in res: STATE.hex_message = res["msg_hex"]  # альтернативный ключ
+    if "message" in res: STATE.message = res["message"]
+
+    # Графики (если формируются)
+    if "phase_data" in res: STATE.phase_data = res["phase_data"]
+    if "xs_ms" in res: STATE.xs_fm_ms = res["xs_ms"]
+    if "xs_fm_ms" in res: STATE.xs_fm_ms = res["xs_fm_ms"]  # альтернативный ключ
+    if "fm_data" in res: STATE.fm_data = res["fm_data"]
+    if "fm_xs_ms" in res: STATE.fm_xs_ms = res["fm_xs_ms"]
+
+    # Файловые параметры
+    if "current_file" in res: STATE.current_file = res["current_file"]
+
+def init_state_fields() -> None:
+    """Инициализация всех полей STATE для гарантии их присутствия в /api/status.
+
+    Вызывается при старте приложения для установки начальных значений.
+    """
+    # Тайминги/границы
+    if not hasattr(STATE, 'preamble_ms'): STATE.preamble_ms = None
+    if not hasattr(STATE, 'total_ms'): STATE.total_ms = None
+    if not hasattr(STATE, 'prise_ms'): STATE.prise_ms = None
+
+    # Фаза и фронты
+    if not hasattr(STATE, 'pos_phase'): STATE.pos_phase = None
+    if not hasattr(STATE, 'neg_phase'): STATE.neg_phase = None
+    if not hasattr(STATE, 'ph_rise'): STATE.ph_rise = None
+    if not hasattr(STATE, 'ph_fall'): STATE.ph_fall = None
+    if not hasattr(STATE, 'symmetry_pct'): STATE.symmetry_pct = None
+    if not hasattr(STATE, 'asymmetry'): STATE.asymmetry = None
+
+    # Сигнальные/общие
+    if not hasattr(STATE, 'rms_dbm'): STATE.rms_dbm = None
+    if not hasattr(STATE, 'freq_hz'): STATE.freq_hz = None
+    if not hasattr(STATE, 'bitrate_bps'): STATE.bitrate_bps = None
+    if not hasattr(STATE, 't_mod'): STATE.t_mod = None
+    if not hasattr(STATE, 'p_wt'): STATE.p_wt = None
+
+    # Декодированное сообщение
+    if not hasattr(STATE, 'hex_message'): STATE.hex_message = ""
+    if not hasattr(STATE, 'message'): STATE.message = "[no message]"
+
+    # Графики
+    if not hasattr(STATE, 'phase_data'): STATE.phase_data = []
+    if not hasattr(STATE, 'xs_fm_ms'): STATE.xs_fm_ms = []
+    if not hasattr(STATE, 'fm_data'): STATE.fm_data = []
+    if not hasattr(STATE, 'fm_xs_ms'): STATE.fm_xs_ms = []
+
+    # Файловые параметры
+    if not hasattr(STATE, 'current_file'): STATE.current_file = ""
+
+# Инициализируем поля при старте
+init_state_fields()
 
 # HTML страница с точным воспроизведением дизайна
 HTML_PAGE = """
@@ -3738,44 +3805,10 @@ def api_upload():
         processing_result = process_cf32_file(file_path)
 
         if processing_result.get("success"):
-            # Обновляем STATE результатами обработки
-            STATE.hex_message = processing_result.get("msg_hex", "")
+            # STRICT_COMPAT: Используем единую утилиту для обновления STATE
+            update_state_from_results(processing_result)
 
-            # Обновляем метрики в Current таблице
-            if "pos_phase" in processing_result:
-                STATE.pos_phase = processing_result["pos_phase"]
-            if "neg_phase" in processing_result:
-                STATE.neg_phase = processing_result["neg_phase"]
-            if "ph_rise" in processing_result:
-                STATE.ph_rise = processing_result["ph_rise"]
-            if "ph_fall" in processing_result:
-                STATE.ph_fall = processing_result["ph_fall"]
-            if "asymmetry" in processing_result:
-                STATE.asymmetry = processing_result["asymmetry"]
-            if "t_mod" in processing_result:
-                STATE.t_mod = processing_result["t_mod"]
-            if "rms_dbm" in processing_result:
-                STATE.rms_dbm = processing_result["rms_dbm"]
-            if "freq_hz" in processing_result:
-                STATE.freq_hz = processing_result["freq_hz"]
-
-            # Добавляем новые метрики для Current таблицы
-            if "bitrate_bps" in processing_result:
-                STATE.bitrate_bps = processing_result["bitrate_bps"]
-            if "symmetry_pct" in processing_result:
-                STATE.symmetry_pct = processing_result["symmetry_pct"]
-            if "total_ms" in processing_result:
-                STATE.total_ms = processing_result["total_ms"]
-            if "prise_ms" in processing_result:
-                STATE.prise_ms = processing_result["prise_ms"]
-            if "preamble_ms" in processing_result:
-                STATE.preamble_ms = processing_result["preamble_ms"]
-
-            # Сохраняем данные фазы для графика
-            STATE.phase_data = processing_result.get("phase_data", [])
-            STATE.xs_fm_ms = processing_result.get("xs_fm_ms", [])
-            STATE.fm_data = processing_result.get("fm_data", [])
-            STATE.fm_xs_ms = processing_result.get("fm_xs_ms", [])
+            # Дополнительное обновление специфичных для файла полей
             STATE.message = f"Processed: {filename} - Message: {STATE.hex_message[:16]}..."
 
             print(f"File processed successfully: {len(STATE.phase_data)} phase samples, {len(STATE.xs_fm_ms)} time samples")

@@ -94,24 +94,22 @@ TesterSDR/
     lib/
   capture/
 
-
+----------------------
 beacon406/               
   __init__.py
-  beacon406-plot.py
+  beacon_tester_web.py
+----------------------
 lib/
   backends.py             
   config.py               
   demod.py               
   metrics.py              
-  gen.py                  
-  io_cf32.py              
+       
+-----------------------
 apps/                    
-  beacon406-gui.py        
-  beacon406-capture.py    
-  beacon406-analyze.py   
   beacon406-generate.py   
 
-
+-------------------------
 
 > обработка сигнала
 

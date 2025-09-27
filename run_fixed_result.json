@@ -1,0 +1,5 @@
+{
+  "message": "Failed to start SDR capture",
+  "running": false,
+  "status": "error"
+}

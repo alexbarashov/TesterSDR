@@ -19,7 +19,7 @@ from tkinter import filedialog
 import tkinter as tk
 
 
-from lib.backends import make_backend, safe_make_backend
+from lib.backends import safe_make_backend
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.config import BACKEND_NAME, BACKEND_ARGS
@@ -395,7 +395,7 @@ class SoapySlidingRMS:
 
         if not hex_msg or hex_msg == "None":
             # Показываем сообщение об отсутствии данных
-            fig, ax = _plt.subplots(figsize=(8, 3))
+            fig, ax = plt.subplots(figsize=(8, 3))
             try:
                 fig.canvas.manager.set_window_title("Декодированное сообщение")
             except Exception:
@@ -403,9 +403,9 @@ class SoapySlidingRMS:
             ax.axis('off')
             ax.text(0.5, 0.5, "Нет сообщения для декодирования.\nСначала должен быть обнаружен PSK импульс.",
                     ha='center', va='center', fontsize=12)
-            _plt.tight_layout()
-            _plt.show(block=False)
-            _plt.pause(0.1)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
             return
 
         try:
@@ -422,7 +422,7 @@ class SoapySlidingRMS:
             rows = build_table_rows(bits)
 
             # Создаем окно Matplotlib с таблицей
-            fig, ax = _plt.subplots(figsize=(14, 8))
+            fig, ax = plt.subplots(figsize=(14, 8))
             ax.axis('off')
 
             # Заголовок окна
@@ -466,13 +466,13 @@ class SoapySlidingRMS:
             except Exception:
                 pass
 
-            _plt.tight_layout()
-            _plt.show(block=False)
-            _plt.pause(0.1)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
 
         except Exception as e:
             # Показываем ошибку
-            fig, ax = _plt.subplots(figsize=(8, 3))
+            fig, ax = plt.subplots(figsize=(8, 3))
             try:
                 fig.canvas.manager.set_window_title("Ошибка декодирования")
             except Exception:
@@ -480,9 +480,9 @@ class SoapySlidingRMS:
             ax.axis('off')
             ax.text(0.5, 0.5, f"Ошибка декодирования сообщения:\n{str(e)}\n\nHEX: {hex_msg}",
                     ha='center', va='center', fontsize=10)
-            _plt.tight_layout()
-            _plt.show(block=False)
-            _plt.pause(0.1)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
 
     # ---- Params window (snapshot, table) ----
     def _on_show_params(self, _event):
@@ -491,7 +491,7 @@ class SoapySlidingRMS:
         hex_msg = getattr(self, "last_msg_hex", None)
 
         if not m:
-            fig, ax = _plt.subplots(figsize=(8, 3))
+            fig, ax = plt.subplots(figsize=(8, 3))
             try:
                 fig.canvas.manager.set_window_title("Phase Parameters")
             except Exception:
@@ -499,9 +499,9 @@ class SoapySlidingRMS:
             ax.axis('off')
             ax.text(0.5, 0.5, "No parameters yet — trigger a PSK pulse first.",
                     ha='center', va='center', fontsize=12)
-            _plt.tight_layout()
-            _plt.show(block=False)
-            _plt.pause(0.1)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
             return
 
         # Заголовки таблицы
@@ -524,7 +524,7 @@ class SoapySlidingRMS:
         ]
 
         # Создаем окно
-        fig, ax = _plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(10, 6))
         ax.axis('off')
 
         # Создаем таблицу
@@ -561,9 +561,9 @@ class SoapySlidingRMS:
         except Exception:
             pass
 
-        _plt.tight_layout()
-        _plt.show(block=False)
-        _plt.pause(0.1)
+        plt.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.1)
 
         
     def _on_show_sdr_status(self, _event):
