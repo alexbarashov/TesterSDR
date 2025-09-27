@@ -234,8 +234,6 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         # Записываем edges[0] в файл для анализа
         edges_info = f"[RUN] edges[0] = {edges[0] if edges is not None and len(edges) > 0 else 'No edges'}"
         edges_info += f", start_idx = {safe_start_idx}, phase_data len = {len(phase_data)}"
-        with open("../edges_run_debug.txt", "w") as f:
-            f.write(edges_info + "\n")
         print(edges_info)
 
         # Извлекаем результаты демодуляции
@@ -295,9 +293,6 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
         if edges is not None and len(edges) > 0:
             preamble_ms = float(edges[0] / FSd * 1e3)
             result['preamble_ms'] = preamble_ms
-            # Записываем для отладки
-            with open("../preamble_run_debug.txt", "w") as f:
-                f.write(f"[RUN] preamble_ms = {preamble_ms:.3f} (edges[0]={edges[0]}, FSd={FSd})\n")
             print(f"[RUN] Calculated preamble_ms = {preamble_ms:.3f}")
 
     except Exception as e:
@@ -767,8 +762,6 @@ def process_cf32_file(file_path):
         # Записываем edges[0] в файл для анализа
         edges_info = f"[FILE] edges[0] = {edges[0] if edges is not None and len(edges) > 0 else 'No edges'}"
         edges_info += f", Using default start_idx=25000, phase_data len = {len(pulse_result['phase_rad'])}"
-        with open("../edges_file_debug.txt", "w") as f:
-            f.write(edges_info + "\n")
         print(edges_info)
 
         # Извлекаем метрики из результата
@@ -871,9 +864,6 @@ def process_cf32_file(file_path):
         FSd = sample_rate / 4.0  # 250000.0
         if edges_list and len(edges_list) > 0:
             preamble_ms = float(edges_list[0] / FSd * 1e3)
-            # Записываем для отладки
-            with open("../preamble_file_debug.txt", "w") as f:
-                f.write(f"[FILE] preamble_ms = {preamble_ms:.3f} (edges[0]={edges_list[0]}, FSd={FSd})\n")
         else:
             preamble_ms = float(baseline_ms)  # fallback
 
