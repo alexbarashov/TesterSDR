@@ -3825,9 +3825,11 @@ def api_upload():
         # Сохраняем файл
         file.save(file_path)
 
-        # Обновляем состояние
-        STATE.current_file = file_path
-        STATE.message = f"Loaded: {filename}"
+        # Обновляем состояние через единую утилиту
+        update_state_from_results({
+            "current_file": file_path,
+            "message": f"Loaded: {filename}"
+        })
 
         print(f"File uploaded: {filename} -> {file_path}")
         print(f"File size: {os.path.getsize(file_path)} bytes")
@@ -3839,14 +3841,19 @@ def api_upload():
             # STRICT_COMPAT: Используем единую утилиту для обновления STATE
             update_state_from_results(processing_result)
 
-            # Дополнительное обновление специфичных для файла полей
-            STATE.message = f"Processed: {filename} - Message: {STATE.hex_message[:16]}..."
+            # Дополнительное обновление сообщения через единую утилиту
+            update_state_from_results({
+                "message": f"Processed: {filename} - Message: {STATE.hex_message[:16]}..."
+            })
 
             print(f"File processed successfully: {len(STATE.phase_data)} phase samples, {len(STATE.xs_fm_ms)} time samples")
 
         else:
             error_msg = processing_result.get("error", "Unknown error")
-            STATE.message = f"Error processing {filename}: {error_msg}"
+            # Используем единую утилиту для обновления сообщения об ошибке
+            update_state_from_results({
+                "message": f"Error processing {filename}: {error_msg}"
+            })
             print(f"Processing error: {error_msg}")
 
         # Возвращаем правильный статус в зависимости от результата обработки
