@@ -264,6 +264,32 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
 
         print(f"[PSK] Analyzed segment: {iq_seg.size} samples, {pulse_len_ms:.1f}ms")
 
+        # NEW: FM discriminator с теми же параметрами что в File режиме
+        try:
+            fm_result = fm_discriminator(
+                iq=iq_seg,
+                fs=fs,
+                pre_lpf_hz=50000,  # антиалиасный фильтр 50 кГц
+                decim=4,            # децимация в 4 раза
+                smooth_hz=15000,    # сглаживание 15 кГц
+                detrend=False,      # отключить удаление линейного тренда
+                center=False,       # без центрирования
+                fir_taps=127        # длина FIR фильтра
+            )
+
+            fm_freq = fm_result.get("freq_hz", [])
+            fm_xs = fm_result.get("xs_ms", [])
+
+            # Добавляем FM данные в результат
+            result['fm_data'] = fm_freq.tolist() if isinstance(fm_freq, np.ndarray) else list(fm_freq) if fm_freq is not None else []
+            result['fm_xs_ms'] = fm_xs.tolist() if isinstance(fm_xs, np.ndarray) else list(fm_xs) if fm_xs is not None else []
+
+            print(f"[FM-RUN] FM processed: {len(result['fm_data'])} freq points, {len(result['fm_xs_ms'])} time points")
+        except Exception as e:
+            print(f"[FM-RUN] FM processing error: {e}")
+            result['fm_data'] = []
+            result['fm_xs_ms'] = []
+
         # Добавляем расчет preamble_ms из edges[0] как в FILE режиме
         FSd = fs / 4.0  # Частота дискретизации после децимации
         if edges is not None and len(edges) > 0:
@@ -922,6 +948,17 @@ def update_state_from_results(res: dict) -> None:
 
     STRICT_COMPAT: Безопасные присваивания только если ключ присутствует.
     Это гарантирует паритет между File и Run режимами.
+
+    Поддерживаемые ключи результата:
+    - Тайминги: preamble_ms, total_ms, prise_ms
+    - Фаза: pos_phase, neg_phase, ph_rise, ph_fall, symmetry_pct, asymmetry
+    - Сигнал: rms_dbm, freq_hz, bitrate_bps, t_mod, p_wt
+    - Сообщения: hex_message, msg_hex, message
+    - Графики: phase_data, xs_ms, xs_fm_ms, fm_data, fm_xs_ms
+    - Файлы: current_file
+
+    Args:
+        res: Словарь с результатами обработки сигнала
     """
     # Тайминги/границы
     if "preamble_ms" in res: STATE.preamble_ms = res["preamble_ms"]
@@ -3609,14 +3646,6 @@ def api_status():
     fs2_var = STATE.fs2_hz + random.uniform(-0.5, 0.5)
     fs3_var = STATE.fs3_hz + random.uniform(-0.5, 0.5)
 
-    print(f"API STATUS DEBUG: phase_data length = {len(STATE.phase_data)}")
-    print(f"API STATUS DEBUG: xs_fm_ms length = {len(STATE.xs_fm_ms)}")
-    print(f"API STATUS DEBUG: pos_phase = {STATE.pos_phase}")
-    print(f"API STATUS DEBUG: neg_phase = {STATE.neg_phase}")
-    if len(STATE.phase_data) > 0:
-        print(f"API STATUS DEBUG: phase_data sample = {STATE.phase_data[:5]}")
-    if len(STATE.xs_fm_ms) > 0:
-        print(f"API STATUS DEBUG: xs_fm_ms sample = {STATE.xs_fm_ms[:5]}")
 
     # Получаем информацию о статусе SDR
     sdr_status = {}

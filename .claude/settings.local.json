@@ -1,33 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pip install:*)",
-      "Bash(python:*)",
-      "Bash(dir:*)",
-      "Bash(tasklist)",
-      "Bash(findstr:*)",
-      "Bash(del add_state_fields.py)",
-      "Bash(taskkill:*)",
-      "Bash(wmic:*)",
-      "Bash(copy beacon_tester_web.py beacon_tester_web_backup.py)",
-      "Bash(python3:*)",
-      "Bash(./stop_flask.bat)",
-      "Bash(./app.bat)",
-      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" \"C:\\work\\TesterSDR\\beacon406\\beacon_tester_web.py\")",
-      "Bash(tasklist:*)",
-      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" \"beacon406/beacon_tester_web.py\")",
-      "Bash(curl:*)",
-      "Bash(cmd /c:*)",
-      "Bash(git add:*)",
-      "Bash(git push:*)",
-      "Bash(set IQ_FILE_PATH=../captures/psk406msg_f75.cf32)",
-      "Bash(chcp:*)",
-      "Bash(stop_flask.bat)",
-      "Bash(tee:*)",
-      "Bash(timeout 3 sleep 2)",
-      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"import beacon406.beacon_tester_web; print(''Import successful'')\")",
-      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"import beacon_tester_web; print(''Import successful with Python 3.9'')\")",
-      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" beacon406/beacon_tester_web.py)"
+      "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"\n# Test FM integration syntax check\nimport sys\nsys.path.insert(0, ''beacon406'')\ntry:\n    from lib.processing_fm import fm_discriminator\n    import numpy as np\n    \n    # Create test IQ data (correct syntax)\n    iq_test = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex64)\n    \n    print(''Python 3.9 FM import and syntax: OK'')\n    print(''fm_discriminator function available'')\nexcept Exception as e:\n    print(''Error:'', e)\n\")"
     ],
     "deny": [],
     "ask": []
