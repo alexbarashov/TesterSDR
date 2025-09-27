@@ -987,10 +987,10 @@ def update_state_from_results(res: dict) -> None:
 
     # Графики (если формируются)
     if "phase_data" in res: STATE.phase_data = res["phase_data"]
-    if "xs_ms" in res: STATE.xs_fm_ms = res["xs_ms"]
-    if "xs_fm_ms" in res: STATE.xs_fm_ms = res["xs_fm_ms"]  # альтернативный ключ
+    if "xs_ms" in res: STATE.xs_ms = res["xs_ms"]  # ФАЗА - исправлено!
+    if "xs_fm_ms" in res: STATE.xs_fm_ms = res["xs_fm_ms"]  # альтернативный ключ (deprecated)
     if "fm_data" in res: STATE.fm_data = res["fm_data"]
-    if "fm_xs_ms" in res: STATE.fm_xs_ms = res["fm_xs_ms"]
+    if "fm_xs_ms" in res: STATE.fm_xs_ms = res["fm_xs_ms"]  # FM - основное имя
 
     # Файловые параметры
     if "current_file" in res: STATE.current_file = res["current_file"]
@@ -1026,9 +1026,10 @@ def init_state_fields() -> None:
 
     # Графики
     if not hasattr(STATE, 'phase_data'): STATE.phase_data = []
-    if not hasattr(STATE, 'xs_fm_ms'): STATE.xs_fm_ms = []
+    if not hasattr(STATE, 'xs_ms'): STATE.xs_ms = []  # Ось времени для фазы
+    if not hasattr(STATE, 'xs_fm_ms'): STATE.xs_fm_ms = []  # deprecated
     if not hasattr(STATE, 'fm_data'): STATE.fm_data = []
-    if not hasattr(STATE, 'fm_xs_ms'): STATE.fm_xs_ms = []
+    if not hasattr(STATE, 'fm_xs_ms'): STATE.fm_xs_ms = []  # Ось времени для FM
 
     # Файловые параметры
     if not hasattr(STATE, 'current_file'): STATE.current_file = ""
@@ -3706,9 +3707,10 @@ def api_status():
         'freq_hz': STATE.freq_hz,
         't_mod': STATE.t_mod,
         'phase_data': STATE.phase_data,
-        'xs_fm_ms': STATE.xs_fm_ms,
+        'xs_ms': STATE.xs_ms,  # Ось времени для фазы
+        'xs_fm_ms': STATE.xs_fm_ms,  # deprecated
         'fm_data': STATE.fm_data,
-        'fm_xs_ms': STATE.fm_xs_ms,
+        'fm_xs_ms': STATE.fm_xs_ms,  # Ось времени для FM
         'sdr_device_info': sdr_device_info,  # Информация об устройстве SDR
         'sdr_status': sdr_status,  # Дополнительный статус SDR
         'realtime_rms_dbm': realtime_rms,  # Real-time RMS данные
