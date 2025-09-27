@@ -1,5 +1,3 @@
-from lib.logger import get_logger
-log = get_logger(__name__)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -30,8 +28,8 @@ from lib.hex_decoder import hex_to_bits, build_table_rows
 from lib.processing_fm import fm_discriminator
 from lib.logger import get_logger, setup_logging
 
-setup_logging()
-log = get_logger(__name__)
+setup_logging()                 # единая точка инициализации логов
+log = get_logger(__name__)      # единственный логгер в модуле
 
 
 # SoapySDR import handled by sdr_backends

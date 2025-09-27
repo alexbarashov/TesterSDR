@@ -1,3 +1,26 @@
+
+# === locate project root (folder that contains "lib") and add to sys.path ===
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve()
+_root = _here
+for _ in range(10):  # поднимаемся максимум на 10 уровней
+    if (_root / "lib").exists():
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        break
+    if _root.parent == _root:
+        break
+    _root = _root.parent
+else:
+    raise RuntimeError("Не найден корень проекта с папкой 'lib'. Перемести скрипт в дерево проекта или выставь PYTHONPATH.")
+
+ROOT = _root  # если ниже в коде используется ROOT
+# === end path setup ===
+
+
+
 from lib.logger import get_logger
 log = get_logger(__name__)
 import numpy as np
@@ -7,6 +30,7 @@ import time
 import sys
 from pathlib import Path
 plt.ion()
+
 
 # === path hack (fixed to project root) ===
 ROOT = Path(__file__).resolve().parents[1]  # beacon406/
@@ -35,6 +59,23 @@ GUARD_MS     = 0.0        # добавление поля слева/справ�
 START_DELAY_MS = 3.0      # обрезание начало сигнала ??? если начальная фаза больше или меньше 1.1 то убивает поиск фронта ???
 CALIB_DB     = -30.0      # если хочешь, учти калибровку тракта
 
+
+
+
+# === path hack (fixed to project root) ===
+def find_root(project_name: str) -> Path:
+    """Ищет корень проекта по имени папки."""
+    root = Path(__file__).resolve()
+    while root.name != project_name:
+        if root.parent == root:  # дошли до корня диска
+            raise RuntimeError(f"Папка {project_name} не найдена в пути")
+        root = root.parent
+    return root
+
+# === настройки ===
+ROOT = find_root("TesterSDR")
+
+file_out_iq = r"psk_out_f50.f32"
 #TEST 
 FILE_IQ_1 = r"psk406msg_f150.cf32"  
 FILE_IQ_2 = r"psk406msg_f100.cf32"
@@ -64,27 +105,9 @@ FILE_IQ_18 = r"rsa406_pulse_20250911_133526_dc.cf32"
 #UI_gen
 FILE_IQ_19 = r"UI_iq_1m.cf32"
 
-file_out_iq = r"psk_out_f50.f32"
-
-# === path hack (fixed to project root) ===
-def find_root(project_name: str) -> Path:
-    """Ищет корень проекта по имени папки."""
-    root = Path(__file__).resolve()
-    while root.name != project_name:
-        if root.parent == root:  # дошли до корня диска
-            raise RuntimeError(f"Папка {project_name} не найдена в пути")
-        root = root.parent
-    return root
-
-# === настройки ===
-ROOT = find_root("TesterSDR")
-
 # формируем шаблон пути (сразу строка!)
 FILE_PATH = str(ROOT / "captures" / FILE_IQ_19)
 file_out = str(ROOT / "captures" / file_out_iq)
-
-
-
 
 
 # ==========================

@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 COSPAS/SARSAT Beacon Tester - Version 2.0
 =========================================
@@ -6,8 +5,7 @@ COSPAS/SARSAT Beacon Tester - Version 2.0
 Одностраничное Flask приложение с аутентичным дизайном.
 Порт: 8738 (чтобы не конфликтовать с оригинальным)
 """
-from lib.logger import get_logger
-log = get_logger(__name__)
+from __future__ import annotations
 import math
 import random
 import time
@@ -85,7 +83,6 @@ time_history = deque(maxlen=1000)
 # Состояние детекции импульсов
 in_pulse = False
 pulse_start_abs = 0
-last_pulse_data = None
 
 # STRICT_COMPAT: Кольцевой буфер IQ для хранения 3+ секунд сигнала
 class IQRingBuffer:
@@ -770,14 +767,14 @@ def process_cf32_file(file_path):
 
         # Извлекаем метрики из результата
         phase_data = pulse_result.get("phase_rad", [])
-        xs_fm_ms = pulse_result.get("xs_ms", [])
+        xs_ms_var  = pulse_result.get("xs_ms", [])
 
         log.debug(f"phase_data length = {len(phase_data) if hasattr(phase_data, '__len__') else 0}")
-        log.debug(f"xs_fm_ms length = {len(xs_fm_ms) if hasattr(xs_fm_ms, '__len__') else 0}")
+        log.debug(f"xs_fm_ms length = {len(xs_ms_var) if hasattr(xs_ms_var, '__len__') else 0}")
         if isinstance(phase_data, np.ndarray) and phase_data.size > 0:
             log.debug(f"phase_data sample: min={np.min(phase_data):.3f}, max={np.max(phase_data):.3f}")
-        if isinstance(xs_fm_ms, np.ndarray) and xs_fm_ms.size > 0:
-            log.debug(f"xs_fm_ms sample: min={np.min(xs_fm_ms):.3f}, max={np.max(xs_fm_ms):.3f}")
+        if isinstance(xs_ms_var, np.ndarray) and xs_ms_var.size > 0:
+            log.debug(f"xs_fm_ms sample: min={np.min(xs_ms_var):.3f}, max={np.max(xs_ms_var):.3f}")
 
         # Безопасное преобразование в список
         if isinstance(phase_data, np.ndarray):
@@ -785,10 +782,10 @@ def process_cf32_file(file_path):
         else:
             phase_list = list(phase_data) if phase_data is not None else []
 
-        if isinstance(xs_fm_ms, np.ndarray):
-            xs_list = xs_fm_ms.tolist()
+        if isinstance(xs_ms_var, np.ndarray):
+            xs_list = xs_ms_var.tolist()
         else:
-            xs_list = list(xs_fm_ms) if xs_fm_ms is not None else []
+            xs_list = list(xs_ms_var) if xs_ms_var is not None else []
 
         # Безопасная обработка edges (может быть numpy массивом)
         if edges is not None and hasattr(edges, '__len__') and len(edges) > 0:
@@ -900,7 +897,7 @@ class BeaconState:
     hex_message: str = ""  # HEX сообщение из загруженного файла
     current_file: str = ""  # Путь к текущему загруженному файлу
     phase_data: list = field(default_factory=list)  # Данные фазы для графика
-    xs_fm_ms: list = field(default_factory=list)  # Временная шкала для FM (deprecated, используйте fm_xs_ms)
+    
     fm_data: list = field(default_factory=list)  # Данные FM частоты для графика
     fm_xs_ms: list = field(default_factory=list)  # Временная шкала для FM графика
 
@@ -3725,7 +3722,7 @@ def api_status():
         't_mod': STATE.t_mod,
         'phase_data': STATE.phase_data,
         'xs_ms': STATE.xs_ms,  # Ось времени для фазы
-        'xs_fm_ms': STATE.xs_fm_ms,  # deprecated
+        
         'fm_data': STATE.fm_data,
         'fm_xs_ms': STATE.fm_xs_ms,  # Ось времени для FM
         'sdr_device_info': sdr_device_info,  # Информация об устройстве SDR
@@ -3861,8 +3858,7 @@ def api_upload():
             update_state_from_results({
                 "message": f"Processed: {filename} - Message: {STATE.hex_message[:16]}..."
             })
-
-            log.info(f"File processed: {len(STATE.phase_data)} phase samples, {len(STATE.xs_fm_ms)} time samples")
+            log.info(f"File processed: {len(STATE.phase_data)} phase samples, {len(STATE.xs_ms)} time samples")
 
         else:
             error_msg = processing_result.get("error", "Unknown error")

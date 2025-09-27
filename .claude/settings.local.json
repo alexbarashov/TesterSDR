@@ -41,7 +41,9 @@
       "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"import sys; sys.path.insert(0, ''beacon406''); import apps.gen.generate_psk406_cf32; print(''gen/generate_psk406_cf32.py OK'')\")",
       "Bash(\"C:\\Users\\alexb\\AppData\\Local\\Programs\\Python\\Python39\\python.exe\" -c \"import sys; sys.path.insert(0, ''beacon406''); import apps.gen.make_multitone_156mhz; print(''gen/make_multitone_156mhz.py OK'')\")",
       "Bash(git rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nОчистка временных файлов отладки и миграции\n\nУдалены временные файлы созданные для отладки системы логирования:\n- migrate_print_psk_fm.py\n- migrate_print_web.py  \n- doc/prompts/claude/+FM_CLEAR_CONTEX.txt\n- doc/prompts/claude/+MORNING_CONTEXT.txt\n- doc/prompts/claude/+UI_FILE_RUN_CONTEX.txt\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
