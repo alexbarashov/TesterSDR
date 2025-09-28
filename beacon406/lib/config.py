@@ -8,7 +8,7 @@
 #BACKEND_NAME = "soapy_sdrplay"  # the best !
 #BACKEND_NAME = "rsa306"
 BACKEND_NAME = "auto"
-#BACKEND_ARGS = None  # можно оставить None, SoapySDR сам найдёт SDR
+BACKEND_ARGS = None  # можно оставить None, SoapySDR сам найдёт SDR
 
 #BACKEND_NAME = "file"
 #BACKEND_ARGS = r"C:/work/TesterSDR/captures/UI_iq_1m.cf32"

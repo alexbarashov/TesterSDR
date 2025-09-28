@@ -13,7 +13,7 @@ from __future__ import annotations
 # если ниже например RSA 825Ks идет без децимации (нужно проверить PSK /4 )
 # нужно оптимизировать работу с буфером сейчас алгоритмы разные у  RSA, AIRspy
 #
-from logger import get_logger
+from lib.logger import get_logger
 log = get_logger(__name__)
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
