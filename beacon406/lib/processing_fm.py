@@ -22,7 +22,7 @@ processing_FM.py — универсальный частотный дискри�
 
 Автор: ChatGPT (GPT-5 Thinking)
 """
-from lib.logger import get_logger
+from logger import get_logger
 log = get_logger(__name__)
 from dataclasses import dataclass
 import numpy as np

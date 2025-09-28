@@ -1,5 +1,3 @@
-from lib.logger import get_logger
-log = get_logger(__name__)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
