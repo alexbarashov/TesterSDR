@@ -770,12 +770,13 @@ def process_cf32_file(file_path):
         xs_ms_var  = pulse_result.get("xs_ms", [])
 
         log.debug(f"phase_data length = {len(phase_data) if hasattr(phase_data, '__len__') else 0}")
-        log.debug(f"xs_fm_ms length = {len(xs_ms_var) if hasattr(xs_ms_var, '__len__') else 0}")
+        #log.debug(f"xs_fm_ms length = {len(xs_ms_var) if hasattr(xs_ms_var, '__len__') else 0}")
+        log.debug(f"xs_ms length = {len(xs_ms_var) if hasattr(xs_ms_var, '__len__') else 0}")
         if isinstance(phase_data, np.ndarray) and phase_data.size > 0:
             log.debug(f"phase_data sample: min={np.min(phase_data):.3f}, max={np.max(phase_data):.3f}")
         if isinstance(xs_ms_var, np.ndarray) and xs_ms_var.size > 0:
-            log.debug(f"xs_fm_ms sample: min={np.min(xs_ms_var):.3f}, max={np.max(xs_ms_var):.3f}")
-
+            #log.debug(f"xs_fm_ms sample: min={np.min(xs_ms_var):.3f}, max={np.max(xs_ms_var):.3f}")
+            log.debug(f"xs_ms sample: min={np.min(xs_ms_var):.3f}, max={np.max(xs_ms_var):.3f}")
         # Безопасное преобразование в список
         if isinstance(phase_data, np.ndarray):
             phase_list = phase_data.tolist()
@@ -797,7 +798,7 @@ def process_cf32_file(file_path):
             "success": True,
             "msg_hex": msg_hex if msg_hex else "",
             "phase_data": phase_list,
-            "xs_fm_ms": xs_list,
+            "xs_ms": xs_list,
             "fm_data": fm_freq.tolist() if isinstance(fm_freq, np.ndarray) else list(fm_freq) if fm_freq is not None else [],
             "fm_xs_ms": fm_xs.tolist() if isinstance(fm_xs, np.ndarray) else list(fm_xs) if fm_xs is not None else [],
             "edges": edges_list,
@@ -982,6 +983,9 @@ def update_state_from_results(res: dict) -> None:
     if "xs_fm_ms" in res: STATE.xs_fm_ms = res["xs_fm_ms"]  # альтернативный ключ (deprecated)
     if "fm_data" in res: STATE.fm_data = res["fm_data"]
     if "fm_xs_ms" in res: STATE.fm_xs_ms = res["fm_xs_ms"]  # FM - основное имя
+    # Back-compat: если пришёл только xs_fm_ms, зеркалим в xs_ms для фазового графика
+    if "xs_ms" not in res and "xs_fm_ms" in res:
+        STATE.xs_ms = res["xs_fm_ms"]
 
     # Файловые параметры
     if "current_file" in res: STATE.current_file = res["current_file"]
