@@ -13,4 +13,7 @@ log = get_logger(__name__)
 #BACKEND_ARGS = None  # можно оставить None, SoapySDR сам найдёт SDR
 
 BACKEND_NAME = "file"
-BACKEND_ARGS = r"C:/work/TesterSDR/captures/psk406msg_f75.cf32"
+BACKEND_ARGS = r"C:/work/TesterSDR/captures/UI_iq_1m.cf32"
+#BACKEND_ARGS = r"C:/work/TesterSDR/captures/psk406msg_f75.cf32"
+
+
