@@ -79,7 +79,6 @@ def _calc_center_and_shift(target_signal_hz: float, if_offset_hz: float) -> Tupl
 def _apply_freq_corr_hz(freq_hz: float, corr_hz: float) -> float:
     return float(freq_hz) + float(corr_hz)
 
-
 def _run_hackrf_transfer(
     sc8_bytes: bytes,
     center_freq_hz: float,
@@ -93,58 +92,56 @@ def _run_hackrf_transfer(
     if not exe:
         raise RuntimeError("hackrf_transfer not found in PATH. Install PothosSDR/HackRF tools.")
 
+    # 1) кадр: полезный сигнал + пауза-нули
+    gap_n = int(round(max(0.0, gap_s) * tx_sample_rate_sps))
+    frame_sc8 = sc8_bytes + (b"\x00" * (gap_n * 2))  # sc8: 2 int8 на сэмпл (I,Q)
+
     with tempfile.TemporaryDirectory() as td:
-        fname = os.path.join(td, "buf.sc8")
-        with open(fname, "wb") as f:
-            f.write(sc8_bytes)
+        fname = os.path.join(td, "frame.sc8")
 
-        base_cmd = [
-            exe,
-            "-t", fname,
-            "-f", str(int(round(center_freq_hz))),
-            "-s", str(int(tx_sample_rate_sps)),
-            "-x", str(int(tx_gain_db)),
-        ]
-        if hw_amp_enabled:
-            base_cmd += ["-a", "1"]
+        def write_bytes(buf: bytes):
+            with open(fname, "wb") as f:
+                f.write(buf)
 
-        def once():
-            cmd = base_cmd[:]          # никаких -N
-            # cmd += ["-v"]            # можно включить подробный лог
+        if isinstance(repeat, str) and repeat.lower() == "loop":
+            # 2A) бесконечный повтор: один кадр + -R (никаких рестартов процесса)
+            write_bytes(frame_sc8)
+            cmd = [
+                exe, "-t", fname,
+                "-f", str(int(round(center_freq_hz))),
+                "-s", str(int(tx_sample_rate_sps)),
+                "-x", str(int(tx_gain_db)),
+            ]
+            if hw_amp_enabled:
+                cmd += ["-a", "1"]
+            cmd += ["-R"]  # repeat indefinitely
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 raise RuntimeError(f"hackrf_transfer failed: {proc.stderr.strip() or proc.stdout.strip()}")
-            # если хочешь видеть stdout/stderr даже при успехе:
             log.info(proc.stdout.strip(), proc.stderr.strip())
 
-
-        if isinstance(repeat, str) and repeat.lower() == "loop":
-            try:
-                while True:
-                    once()
-                    if gap_s > 0:
-                        gap = _zero_gap(gap_s, tx_sample_rate_sps)
-                        gap_bytes = _iq_cf32_to_sc8(gap, amp_scale=1.0)
-                        with open(fname, "wb") as f:
-                            f.write(gap_bytes)
-                        once()
-                        with open(fname, "wb") as f:
-                            f.write(sc8_bytes)
-            except KeyboardInterrupt:
-                return
         else:
-            N = int(repeat)
-            for k in range(N):
-                once()
-                if k + 1 < N and gap_s > 0:
-                    gap = _zero_gap(gap_s, tx_sample_rate_sps)
-                    gap_bytes = _iq_cf32_to_sc8(gap, amp_scale=1.0)
-                    with open(fname, "wb") as f:
-                        f.write(gap_bytes)
-                    once()
-                    with open(fname, "wb") as f:
-                        f.write(sc8_bytes)
+            # 2B) конечное число повторов: склеиваем N кадров и один запуск
+            N = max(1, int(repeat))
+            if N == 1:
+                write_bytes(sc8_bytes)  # без паузы в конце — один прогон
+            else:
+                # [payload + gap] * (N-1) + payload
+                big = frame_sc8 * (N - 1) + sc8_bytes
+                write_bytes(big)
 
+            cmd = [
+                exe, "-t", fname,
+                "-f", str(int(round(center_freq_hz))),
+                "-s", str(int(tx_sample_rate_sps)),
+                "-x", str(int(tx_gain_db)),
+            ]
+            if hw_amp_enabled:
+                cmd += ["-a", "1"]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise RuntimeError(f"hackrf_transfer failed: {proc.stderr.strip() or proc.stdout.strip()}")
+            log.info(proc.stdout.strip(), proc.stderr.strip())
 
 
 from typing import Optional, Tuple, Union  # вверху файла должен быть Union

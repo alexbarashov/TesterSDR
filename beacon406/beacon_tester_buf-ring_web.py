@@ -46,8 +46,6 @@ data_lock = threading.Lock()
 pulse_queue = queue.Queue()
 current_rms_dbm = -100.0  # Текущее значение RMS в dBm
 last_pulse_data = None    # Данные о последнем импульсе
-last_pulse_iq = None  # IQ сегмент последнего импульса (np.complex64)
-
 
 # Параметры обработки сигналов (из beacon406-plot.py)
 TARGET_SIGNAL_HZ = 406_037_000
@@ -62,8 +60,10 @@ PULSE_THRESH_DBM = -45.0
 READ_CHUNK = 65536
 EPS = 1e-20
 
-
+# STRICT_COMPAT: Кольцевой буфер IQ и actual sample rate
+iq_ring_buffer = None
 actual_sample_rate_sps = SAMPLE_RATE_SPS  # По умолчанию, обновится при init SDR
+bp_sample_counter = 0  # Счетчик отсчетов БП-сигнала после NCO
 
 # STRICT_COMPAT: История импульсов для PSK-406 анализа
 PULSE_HISTORY_MAX = 50
@@ -83,131 +83,84 @@ time_history = deque(maxlen=1000)
 # Состояние детекции импульсов
 in_pulse = False
 pulse_start_abs = 0
-
-
-
-
 # --- Short-pulse policy & debounce ---
-MIN_PULSE_MS_FOR_PSK = 600.0   # короткие импульсы не обрабатываем
+MIN_PULSE_MS_FOR_PSK = 15.0   # короткие импульсы не обрабатываем
 
 last_reported_end_abs = -1     # последний "конец" импульса, уже залогированный
 
-# === plot-like analyzer state ===
-# Храним только последний блок IQ (как в plot)
-last_iq_block = None        # np.ndarray[complex64] | None
-last_block_fs = None        # float | None (реальный Fs)
-last_block_t0 = None        # float | None (unix time начала этого блока)
+# STRICT_COMPAT: Кольцевой буфер IQ для хранения 3+ секунд сигнала
+class IQRingBuffer:
+    def __init__(self, duration_sec: float, sample_rate: float):
+        self.duration_sec = duration_sec
+        self.sample_rate = sample_rate
+        self.capacity = int(duration_sec * sample_rate)
+        self.buffer = np.zeros(self.capacity, dtype=np.complex64)
+        self.write_pos = 0
+        self.total_written = 0
+        self.lock = threading.Lock()
+        log.info(f"IQ buffer created: {self.capacity} samples ({duration_sec}s at {sample_rate:.0f} Hz)")
 
+    def write(self, samples: np.ndarray):
+        """Записать отсчеты в кольцевой буфер"""
+        with self.lock:
+            n = len(samples)
+            if n >= self.capacity:
+                # Если данных больше емкости, берем последние
+                self.buffer[:] = samples[-self.capacity:]
+                self.write_pos = 0
+                self.total_written += n
+            else:
+                # Запись в две части если переход через границу
+                end_pos = self.write_pos + n
+                if end_pos <= self.capacity:
+                    self.buffer[self.write_pos:end_pos] = samples
+                    self.write_pos = end_pos % self.capacity
+                else:
+                    first_part = self.capacity - self.write_pos
+                    self.buffer[self.write_pos:] = samples[:first_part]
+                    self.buffer[:n-first_part] = samples[first_part:]
+                    self.write_pos = n - first_part
+                self.total_written += n
 
-class PlotLikeAnalyzer:
-    def __init__(self, fs, buffer_sec=6.0, rms_win_ms=1.0):
-        self.fs = float(fs)
-        self.win = max(1, int(round(self.fs * (rms_win_ms*1e-3))))
-        self.max_samps = int(buffer_sec * self.fs)
-        self.sig = np.zeros(self.max_samps, dtype=np.complex64)
-        self.wpos = 0
-        self.filled = 0
-        self.pow_tail = np.zeros(self.win-1, dtype=np.float32)
-        self.global_index = 0
-        self.in_pulse = False
-        self.pulse_start_abs = 0
+    def get_segment(self, abs_start: int, abs_end: int) -> np.ndarray:
+        """Извлечь сегмент по абсолютным индексам"""
+        with self.lock:
+            # Проверка доступности данных
+            oldest_available = max(0, self.total_written - self.capacity)
+            if abs_start < oldest_available:
+                log.debug(f"[BUFFER] Segment too old: start={abs_start} < oldest={oldest_available}")
+                return np.array([], dtype=np.complex64)
 
-    def _append(self, iq):
-        n = int(len(iq))
-        end = self.wpos + n
-        if end <= self.max_samps:
-            self.sig[self.wpos:end] = iq
-        else:
-            first = self.max_samps - self.wpos
-            self.sig[self.wpos:] = iq[:first]
-            self.sig[:end % self.max_samps] = iq[first:]
-        self.wpos = (self.wpos + n) % self.max_samps
-        self.filled = min(self.filled + n, self.max_samps)
-        self.global_index += n
+            # Вычисляем относительные позиции от начала доступных данных
+            available_samples = min(self.total_written, self.capacity)
+            buffer_abs_start = self.total_written - available_samples
 
-    def feed(self, iq_chunk, dbm_offset_db, calib_db, thresh_dbm):
-        # 1) линейная запись
-        n = len(iq_chunk)
-        if n == 0: return []
-        # Абсолютный индекс первого сэмпла чанка ДО _append
-        chunk_start_abs = self.global_index
+            start_offset = abs_start - buffer_abs_start
+            end_offset = abs_end - buffer_abs_start
 
-        # 2) RMS на этом куске с хвостом
-        p = (iq_chunk.real**2 + iq_chunk.imag**2).astype(np.float32)
-        if self.pow_tail.size:
-            p = np.concatenate([self.pow_tail, p], dtype=np.float32)
-        cs = np.cumsum(p, dtype=np.float64)
-        if len(p) >= self.win:
-            P_win = (cs[self.win-1:] - np.concatenate(([0.0], cs[:-self.win])))/self.win
-        else:
-            P_win = np.empty(0, dtype=np.float32)
+            if start_offset < 0 or end_offset > available_samples:
+                log.debug(f"[BUFFER] Segment out of bounds: offset={start_offset}..{end_offset}, available={available_samples}")
+                return np.array([], dtype=np.complex64)
 
-        # обновить хвост мощности
-        self.pow_tail = p[-(self.win-1):].copy() if len(p) >= (self.win-1) else p.copy()
+            # Case 1: Buffer not yet full (linear access)
+            if self.total_written <= self.capacity:
+                return self.buffer[start_offset:end_offset].copy()
 
-        # 3) dBm = 10log10 + смещения (как в plot)
-        eps = 1e-20
-        rms_dbm = 10.0*np.log10(np.maximum(P_win, eps)) + dbm_offset_db + calib_db
+            # Case 2: Buffer is full and wrapped (ring access)
+            else:
+                # write_pos points to oldest data in ring buffer
+                logical_start = (self.write_pos + start_offset) % self.capacity
+                logical_end = (self.write_pos + end_offset) % self.capacity
 
-        # 4) бинаризация и переходы
-        on = (rms_dbm >= thresh_dbm).astype(np.int8)
-        
-        #from scipy.ndimage import binary_opening, binary_closing  # Добавьте в начало файла или перед feed
-        # Дебаунс: игнорировать провалы и всплески короче ~3 мс
-        #on = binary_closing(on, structure=np.ones(3))  # Залатать провалы
-        #on = binary_opening(on, structure=np.ones(3))  # Убрать шумовые всплески
-
-
-
-        trans = np.diff(on, prepend=on[0])
-
-        # 5) абсолютные индексы для каждой точки RMS (по концу окна)
-        idx_rms0 = chunk_start_abs + (self.win - 1)
-        idx_rms = idx_rms0 + np.arange(len(rms_dbm), dtype=np.int64)
-
-        # 6) собираем пары старт/конец как в plot
-        pairs = []
-        for i, t in enumerate(trans):
-            if t == 1:                      # фронт
-                if not self.in_pulse:
-                    self.in_pulse = True
-                    self.pulse_start_abs = int(idx_rms[i])
-            elif t == -1:                   # спад
-                if self.in_pulse:
-                    pulse_end_abs = int(idx_rms[i-1])
-                    pairs.append((self.pulse_start_abs, pulse_end_abs))
-                    self.in_pulse = False
-        # подвешенный старт закроется на следующем чанке
-
-        # 7) записать IQ после вычислений индексов
-        self._append(iq_chunk)
-        return pairs
-
-    #def extract_linear(self, start_abs, end_abs, pre_frac=0.25, win_frac=1.5, min_pre_ms=120.0):
-     
-    def extract_linear(self, start_abs, end_abs, pre_frac=0.5, win_frac=2.0, min_pre_ms=120.0):
-        
-        dur = max(1, end_abs - start_abs + 1)
-        pre = int(round(pre_frac * dur))             # 25% до старта
-        win_len = int(round(win_frac * dur))         # 1.5× длительност
-
-        win_start = max(0, start_abs - pre)
-        win_end = win_start + win_len
-
-        seg = np.empty(win_len, dtype=np.complex64)
-        base_abs0 = self.global_index - self.filled   # абс. индекс, соответствующий self.sig[0]
-        for off, idx in enumerate(range(win_start, win_end)):
-            loc = (idx - base_abs0) % self.max_samps
-            seg[off] = self.sig[loc]
-        return seg, win_start, win_end
-
-# Глобальный анализатор
-ANALYZER = None
-
-
-# не работал удалили - Кольцевой буфер IQ для хранения 3+ секунд сигнала
-#class IQRingBuffer:
-
+                if logical_end > logical_start:
+                    # Segment doesn't wrap around
+                    return self.buffer[logical_start:logical_end].copy()
+                else:
+                    # Segment wraps around buffer boundary
+                    return np.concatenate([
+                        self.buffer[logical_start:],
+                        self.buffer[:logical_end]
+                    ]).copy()
 
 def get_actual_fs() -> float:
     """Получить фактический sample rate"""
@@ -234,7 +187,20 @@ def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
 
         pulse_len_ms = len(iq_seg) / fs * 1000
 
-        # RUN: используем сегмент как есть (как в plot)
+        # ИСПРАВЛЕНИЕ: Применяем _find_pulse_segment для правильной обрезки преамбулы
+        thresh_dbm = -60.0  # порог как в FILE
+        win_ms = 1.0  # окно RMS как в FILE  
+        start_delay_ms = 3.0  # обрезание начала как в FILE
+        calib_db = -30.0  # калибровка как в FILE
+        
+        # Применяем _find_pulse_segment для обрезки преамбулы
+        iq_seg_trimmed = _find_pulse_segment(iq_seg, fs, thresh_dbm, win_ms, start_delay_ms, calib_db)
+        
+        if iq_seg_trimmed is not None and len(iq_seg_trimmed) > 0:
+            iq_seg = iq_seg_trimmed  
+            log.debug(f"[PSK-RUN] _find_pulse_segment success: {len(iq_seg)} samples")
+        else:
+            log.debug(f"[PSK-RUN] _find_pulse_segment failed, using original: {len(iq_seg)} samples")
 
         # Используем тот же путь обработки что и рабочая кнопка File
         baseline_ms = 2.0  # PSK_BASELINE_MS - такой же как в FILE режиме
@@ -378,15 +344,14 @@ def init_sdr_backend():
             sdr_device_info = f"{driver}: {device_info}"
             log.info(f"SDR detected: {sdr_device_info}")
 
-
-
             # STRICT_COMPAT: Сохраняем actual sample rate и создаем буфер
-            global actual_sample_rate_sps, win_samps, nco_k
+            global actual_sample_rate_sps, iq_ring_buffer, win_samps, nco_k
             actual_sample_rate_sps = status.get('actual_sample_rate_sps', SAMPLE_RATE_SPS)
+            iq_ring_buffer = IQRingBuffer(duration_sec=3.0, sample_rate=actual_sample_rate_sps)
+            # Обновляем win_samps и nco_k с фактическим sample rate
             win_samps = int(RMS_WIN_MS * 1e-3 * actual_sample_rate_sps)
             nco_k = 2.0 * np.pi * BB_SHIFT_HZ / actual_sample_rate_sps
-            log.info(f"SDR sample rate: {actual_sample_rate_sps:.3f} Hz")
-
+            log.info(f"SDR sample rate: {actual_sample_rate_sps:.3f} Hz, buffer: {iq_ring_buffer.duration_sec} seconds")
         except Exception:
             sdr_device_info = f"{BACKEND_NAME} device"
 
@@ -412,24 +377,22 @@ def init_sdr_backend():
         return False
 
 def start_sdr_capture():
-    global sdr_running, reader_thread, ANALYZER
+    """Запуск захвата SDR данных в реальном времени"""
+    global sdr_running, reader_thread
 
     if not sdr_backend:
         log.warning("SDR backend not initialized, cannot start capture")
         return False
+
     if sdr_running:
         log.debug("SDR capture already running")
         return True
-
-    # ИНИЦИАЛИЗАЦИЯ ДО СТАРТА ПОТОКА
-    ANALYZER = PlotLikeAnalyzer(fs=get_actual_fs())
 
     sdr_running = True
     reader_thread = threading.Thread(target=sdr_reader_loop, daemon=True)
     reader_thread.start()
     log.info("Real-time SDR capture started")
     return True
-
 
 def stop_sdr_capture():
     """Остановка захвата SDR данных"""
@@ -496,12 +459,11 @@ def process_samples_realtime(samples: np.ndarray):
         x *= mixer
         nco_phase = float((nco_phase + nco_k * samples.size) % (2.0 * np.pi))
 
-    # Сохраняем последний блок (как в plot, без кольца)
-    global last_iq_block, last_block_fs, last_block_t0
-    last_iq_block = x  # .copy() не нужен, если ниже его не модифицируем
-    last_block_fs = float(actual_sample_rate_sps)
-    # время начала этого блока (нынешний now относится к концу обработки RMS; берём грубо начало)
-    last_block_t0 = time.time() - (len(x) / last_block_fs)
+    # STRICT_COMPAT: Запись БП-сигнала в кольцевой буфер
+    global iq_ring_buffer, bp_sample_counter
+    if iq_ring_buffer is not None:
+        iq_ring_buffer.write(x)
+        bp_sample_counter += len(x)
 
     # Вычисление мощности
     p_block = (np.abs(x) ** 2)
@@ -547,39 +509,9 @@ def process_samples_realtime(samples: np.ndarray):
         #frac = float(np.mean(rms_dbm_vec >= PULSE_THRESH_DBM)) if rms_dbm_vec.size else 0.0
         #log.debug(f"[RMS] max={peak:.1f} dBm, thr={PULSE_THRESH_DBM:.1f} dBm, over={frac*100:.1f}%")
 
-        # параметры, как в plot
-        dbm_offset_db = DBM_OFFSET_DB
-        try:
-            calib_db = sdr_backend.get_calib_offset_db()
-        except Exception:
-            calib_db = 0.0
 
-        pairs = ANALYZER.feed(x, dbm_offset_db, calib_db, PULSE_THRESH_DBM)
-
-        for (start_abs, end_abs) in pairs:
-            fs = ANALYZER.fs
-            dur_ms = (end_abs - start_abs + 1) / fs * 1000.0
-            log.info(f"Pulse detected: start={start_abs}, length: {dur_ms:.1f}ms")
-
-            iq_seg, win_start, win_end = ANALYZER.extract_linear(start_abs, end_abs)
-            # анализ — как в plot: используем сегмент, НИЧЕГО дополнительно не «подрезаем»
-            try:
-                psk_result = analyze_psk406(iq_seg, fs)   # ВНУТРИ analyze_psk406 не вызываем _find_pulse_segment для RUN
-
-                psk_ok   = bool(psk_result.get('msg_ok', False))
-                msg_hex  = psk_result.get('msg_hex')
-                hex_short = (msg_hex[:16] + '...') if msg_hex else 'None'
-                pread    = psk_result.get('preamble_ms', None)
-
-                log.info(
-                    "Pulse processed: %.1fms, PSK ok=%s, preamble=%s ms, HEX=%s",
-                    dur_ms, psk_ok, f"{pread:.2f}" if isinstance(pread, (int,float)) else "N/A", hex_short
-                )
-
-
-            except Exception as e:
-                log.error(f"Pulse processing error: {e}")
-
+        # Детекция импульсов
+        detect_pulses(rms_dbm_vec, idx_end, x, p_cont_start_idx)
 
         # Сохраняем хвост для следующего блока
         if p_cont.size > win_samps:
@@ -608,87 +540,105 @@ def detect_pulses(rms_dbm_vec: np.ndarray, idx_end: np.ndarray, iq_block: np.nda
     # абсолютные индексы конца каждого RMS-окна
     idx_end = p_cont_start_idx + (win_samps - 1) + np.arange(rms_dbm_vec.size, dtype=np.int64)
 
-
-    # Порог
+    # Порог (оставляем как есть в проекте)
     on = (rms_dbm_vec >= PULSE_THRESH_DBM)
     trans = np.diff(on.astype(np.int8), prepend=on[0])
 
+    # Если блок начинается на плато и мы ещё не в импульсе — стартуем с нулевого окна
+    if on[0] and (not in_pulse):
+        in_pulse = True
+        pulse_start_abs = int(idx_end[0])
+        # log.debug(f"[PULSE] start (leading) @ {pulse_start_abs}")
+
     fs = float(get_actual_fs())
 
-    # --- NEW: анти-распил бурста короткими провалами ---
-    OFF_HANG_MS = 60.0                             # сколько держать "OFF", прежде чем закрыть импульс
-    off_hang_samps = max(1, int(round(OFF_HANG_MS * 1e-3 * fs)))
-    off_run = 0                                    # длина текущей OFF-полосы (в сэмплах RMS-шага)
-    candidate_end_abs = None                       # куда закрывать, когда OFF подтвердится
-    # -----------------------------------------------
-
+    # Один проход: +1 → старт, −1 → конец
     for i, t in enumerate(trans):
         if t == 1:
             # старт
             if not in_pulse:
                 in_pulse = True
                 pulse_start_abs = int(idx_end[i])
-            # если вернулись "on" до закрытия — сбрасываем OFF-набор
-            off_run = 0
-            candidate_end_abs = None
+                # log.debug(f"[PULSE] start @ {pulse_start_abs}")
 
         elif t == -1:
-            # первый момент ухода "вниз": запомним конец как кандидат
-            if in_pulse and candidate_end_abs is None:
-                candidate_end_abs = int(idx_end[max(i - 1, 0)])
-            # увеличивать off_run начнём ниже — см. блок after-loop
+            # конец
+            if in_pulse:
+                pulse_end_abs = int(idx_end[max(i - 1, 0)])  # конец предыдущего окна
+                pulse_len_samples = max(1, pulse_end_abs - pulse_start_abs + 1)
+                pulse_len_ms = pulse_len_samples / fs * 1000.0
 
-        # --- копим OFF между переходами ---
-        if in_pulse:
-            if on[i]:
-                # на плато/высоко — сброс OFF
-                off_run = 0
-                candidate_end_abs = None
-            else:
-                # на низком уровне — наращиваем OFF
-                off_run += 1
-                if off_run >= off_hang_samps and candidate_end_abs is not None:
-                    # подтверждённый конец импульса
-                    pulse_end_abs = candidate_end_abs
-                    pulse_len_samples = max(1, pulse_end_abs - pulse_start_abs + 1)
-                    pulse_len_ms = pulse_len_samples / fs * 1000.0
-
-                    if pulse_len_ms < MIN_PULSE_MS_FOR_PSK:
-                        log.info(f"Pulse detected: {pulse_end_abs}, length: {pulse_len_ms:.1f}ms (short, ignored)")
-                    else:
-                        log.info(f"Pulse detected: start={pulse_start_abs}, length: {pulse_len_ms:.1f}ms")
-                        try:
-                            process_pulse_segment(pulse_start_abs, pulse_end_abs)
-                        except Exception as e:
-                            log.error(f"Pulse processing error: {e}")
-
-                    # сброс состояния импульса
+                # антидубль ровно того же конца
+                if pulse_end_abs == last_reported_end_abs:
                     in_pulse = False
                     pulse_start_abs = 0
-                    off_run = 0
-                    candidate_end_abs = None
+                    continue
 
+                if pulse_len_ms < MIN_PULSE_MS_FOR_PSK:
+                    log.info(f"Pulse detected: {pulse_end_abs}, length: {pulse_len_ms:.1f}ms (short, ignored)")
+                    last_reported_end_abs = pulse_end_abs
+                    in_pulse = False
+                    pulse_start_abs = 0
+                    continue
+
+                log.info(f"Pulse detected: {pulse_end_abs}, length: {pulse_len_ms:.1f}ms")
+                try:
+                    process_pulse_segment(pulse_start_abs, pulse_end_abs)
+                except Exception as e:
+                    log.error(f"Pulse processing error: {e}")
+
+                last_reported_end_abs = pulse_end_abs
+                in_pulse = False
+                pulse_start_abs = 0
 
     # если блок закончился на плато — просто ждём спада в следующем блоке
 
 
 def process_pulse_segment(start_abs, end_abs, iq_fallback=None):
     """Обработка сегмента импульса для PSK демодуляции"""
-    
-    global last_pulse_data, ANALYZER
+    global iq_ring_buffer, last_pulse_data
 
-    # Извлекаем сегмент «как в plot» из ANALYZER по абсолютным индексам
-    iq_segment = np.array([], dtype=np.complex64)
-    if ANALYZER is not None:
-        try:
-            iq_segment, win_start, win_end = ANALYZER.extract_linear(start_abs, end_abs)
-        except Exception as e:
-            log.debug(f"[RUN-EXTRACT] analyzer extract failed: {e}")
+    # STRICT_COMPAT: Извлекаем сегмент из кольцевого буфера 
+    if iq_ring_buffer is not None:
+        # Конвертируем индексы RMS в индексы БП-сигнала
+        # Предзахват 25% длительности импульса (как в plot)
+        fs = float(get_actual_fs())
+        duration_samps = max(1, int(end_abs - start_abs + 1))
+        pre_samps = int(round(0.25 * duration_samps))          # 25% до старта
+        win_len   = int(round(1.5 * duration_samps))           # 1.5× длительности
 
-    # Фоллбэк — если по какой-то причине сегмент не извлёкся
-    if iq_segment.size == 0 and iq_fallback is not None:
-        iq_segment = iq_fallback
+        win_start = max(0, start_abs - pre_samps)
+        win_end   = win_start + win_len
 
+        bp_start = win_start
+        bp_end   = win_end
+
+        # Проверяем доступность данных в буфере используя логику класса
+        oldest_available = max(0, iq_ring_buffer.total_written - iq_ring_buffer.capacity)
+        newest_available = iq_ring_buffer.total_written
+
+        # Корректируем границы под доступные данные
+        effective_start = max(bp_start, oldest_available)
+        effective_end = min(bp_end, newest_available)
+
+        if effective_start < effective_end:
+            iq_segment = iq_ring_buffer.get_segment(effective_start, effective_end)
+        else:
+            iq_segment = np.array([])  # Пустой массив если данных нет
+
+        log.debug(f"[RUN-EXTRACT] Buffer range: {oldest_available} to {newest_available}")
+        log.debug(f"[RUN-EXTRACT] Requested range: {bp_start} to {bp_end}")
+        log.debug(f"[RUN-EXTRACT] Effective range: {effective_start} to {effective_end}")     
+        log.debug(f"[RUN-EXTRACT] Extended segment: {iq_segment.size if hasattr(iq_segment, 'size') else len(iq_segment)} samples, pre_samps={pre_samps}")
+
+
+        if iq_segment.size > 0:
+            log.debug(f"[PULSE] Extracted segment: {iq_segment.size} samples from buffer")
+        else:
+            log.debug("[PULSE] Segment not available in buffer, using fallback")
+            iq_segment = iq_fallback if iq_fallback is not None else np.array([])
+    else:
+        iq_segment = iq_fallback if iq_fallback is not None else np.array([])
 
     try:
         # STRICT_COMPAT: PSK-406 анализ сегмента импульса
@@ -3715,14 +3665,7 @@ HTML_PAGE = """
         }
 
         async function saveFile() {
-            try {
-                const r = await fetch('/api/save_iq', {method: 'POST'});
-                const j = await r.json();
-                if (j.ok) alert('Saved: ' + j.file);
-                else alert('Save failed: ' + (j.error || 'unknown'));
-            } catch (e) {
-                alert('Save error: ' + e);
-            }
+            await fetch('/api/save', { method: 'POST' });
         }
 
         // Первоначальная загрузка данных (автообновление отключено по умолчанию)
@@ -4011,7 +3954,8 @@ def api_init():
             'status': 'success' if success else 'failed',
             'sdr_device_info': sdr_device_info,
             'actual_sample_rate_sps': actual_sample_rate_sps,
-            
+            'iq_buffer_capacity': iq_ring_buffer.capacity if iq_ring_buffer else 0,
+            'iq_buffer_duration_sec': iq_ring_buffer.duration_sec if iq_ring_buffer else 0.0
         })
     except Exception as e:
         return jsonify({'status': 'error', 'error': str(e)}), 500
@@ -4025,8 +3969,14 @@ def api_state():
             'sdr_device_info': sdr_device_info,
             'current_rms_dbm': current_rms_dbm,
             'sample_counter': int(sample_counter),
+            'bp_sample_counter': int(bp_sample_counter),
             'actual_sample_rate_sps': actual_sample_rate_sps,
-
+            'iq_buffer_info': {
+                'total_written': int(iq_ring_buffer.total_written) if iq_ring_buffer else 0,
+                'capacity': int(iq_ring_buffer.capacity) if iq_ring_buffer else 0,
+                'write_pos': int(iq_ring_buffer.write_pos) if iq_ring_buffer else 0,
+                'duration_sec': iq_ring_buffer.duration_sec if iq_ring_buffer else 0.0
+            },
             'pulse_status': {
                 'in_pulse': in_pulse,
                 'pulse_start_abs': int(pulse_start_abs)
@@ -4070,5 +4020,4 @@ if __name__ == '__main__':
     log.info("Interface available at: http://127.0.0.1:8738/")
     log.info("SDR will be initialized on Measure button press")
     log.info("To stop: Ctrl+C")
-    #app.run(host='127.0.0.1', port=8738, debug=True)
-    app.run(host='127.0.0.1', port=8738, debug=False, use_reloader=False, threaded=False)
+    app.run(host='127.0.0.1', port=8738, debug=True)

@@ -68,7 +68,7 @@ PULSE_STORE_SEC     = 1.5
 PSK_YLIMIT_RAD       = 1.5
 PSK_BASELINE_MS      = 2.0
 EPS = 1e-20
-DEBUG_IMPULSE_LOG   = False
+DEBUG_IMPULSE_LOG   = True
 
 
 def _is_file_wait_mode():
@@ -1353,11 +1353,20 @@ class SoapySlidingRMS:
 
                 self.in_pulse = False
                 self.pulse_start_abs = None
+
                 duration_samps = max(1, found_end - start_abs + 1)
                 win_len = int(round(duration_samps * 1.5))
                 pre = int(round(duration_samps * 0.25))
                 win_start = max(0, start_abs - pre)
                 win_end = win_start + win_len
+
+                # --- NEW: логируем длительность импульса при обнаружении ---
+                try:
+                    dur_ms = 1000.0 * duration_samps / float(self.sample_rate)
+                    if DEBUG_IMPULSE_LOG:
+                        log.info(f"Pulse detected: start={start_abs}, length: {dur_ms:.1f}ms")
+                except Exception:
+                    pass
 
                 with self.data_lock:
                     m = (self.full_idx >= win_start) & (self.full_idx <= win_end)
@@ -1378,8 +1387,16 @@ class SoapySlidingRMS:
                             ys = self.full_rms[m]
                             pulse_data["xs_ms"] = xs_ms
                             pulse_data["ys"] = ys
+
                             dur_ms = 1000.0 * duration_samps / float(self.sample_rate)
                             pulse_data["pulse_title"] = f"Импульс: длит.≈ {dur_ms:.1f} мс, порог {PULSE_THRESH_DBM:.1f} dBm, окно 1.5×"
+
+                            # --- NEW: финальный лог для контроля (совпадает с web-стилем) ---
+                            try:
+                                if DEBUG_IMPULSE_LOG:
+                                    log.info(f"Pulse processed: {dur_ms:.1f}ms")
+                            except Exception:
+                                pass
 
                         if seg_end_rel > 0 and seg_start_rel < self.full_samples.size:
                             seg_start_rel = max(0, seg_start_rel)
