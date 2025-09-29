@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(del test_signal_params.html)"
+      "Bash(git commit:*)",
+      "Bash(tasklist)",
+      "Bash(findstr:*)",
+      "Bash(curl -s \"http://127.0.0.1:8738/api/sdr/get_config\")",
+      "Bash(curl -s -X POST -H \"Content-Type: application/json\" -d \"{\"\"center_freq_hz\"\":406000000,\"\"sample_rate_sps\"\":1000000,\"\"bb_shift_hz\"\":-37000,\"\"bb_shift_enable\"\":true,\"\"freq_corr_hz\"\":0,\"\"agc\"\":false,\"\"gain_db\"\":30,\"\"bias_t\"\":false,\"\"antenna\"\":\"\"RX\"\",\"\"backend_name\"\":\"\"soapy_sdrplay\"\"}\" \"http://127.0.0.1:8738/api/sdr/set_config\")",
+      "Bash(curl -s \"http://127.0.0.1:8738\")"
     ],
     "deny": [],
     "ask": []

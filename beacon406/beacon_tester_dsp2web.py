@@ -371,12 +371,13 @@ def api_sdr_get_config():
     """Получение текущей конфигурации SDR"""
     try:
         # Отправить запрос на получение конфигурации DSP сервису
-        response = send_dsp_command({'cmd': 'get_sdr_config'})
+        response = send_command({'cmd': 'get_sdr_config'})
         if response and response.get('ok'):
             return jsonify(response.get('config', {}))
         else:
             # Возвратить конфигурацию по умолчанию если DSP сервис недоступен
             return jsonify({
+                'backend_name': 'auto',
                 'center_freq_hz': 406000000,
                 'sample_rate_sps': 1000000,
                 'bb_shift_enable': True,
@@ -406,7 +407,7 @@ def api_sdr_set_config():
             'config': config_data
         }
 
-        response = send_dsp_command(command)
+        response = send_command(command)
         if response and response.get('ok'):
             return jsonify({
                 'ok': True,
@@ -1198,6 +1199,7 @@ HTML_TEMPLATE = '''
             fetch('/api/sdr/get_config')
                 .then(response => response.json())
                 .then(config => {
+                    document.getElementById('backend_name').value = config.backend_name || 'auto';
                     document.getElementById('center_freq_hz').value = config.center_freq_hz || '';
                     document.getElementById('sample_rate_sps').value = config.sample_rate_sps || '';
                     document.getElementById('bb_shift_hz').value = config.bb_shift_hz || '';
@@ -1215,8 +1217,18 @@ HTML_TEMPLATE = '''
         }
 
         function applySDRConfig() {
+            // Валидация backend_name
+            const allowedBackends = ['auto', 'soapy_rtl', 'soapy_hackrf', 'soapy_airspy', 'soapy_sdrplay', 'rsa306', 'file'];
+            let backendValue = document.getElementById('backend_name').value;
+            if (!allowedBackends.includes(backendValue)) {
+                backendValue = 'auto';
+                document.getElementById('backend_name').value = 'auto';
+                logEvent('warning', `Invalid backend_name, reset to 'auto'`);
+            }
+
             // Собрать данные из формы
             const config = {
+                backend_name: backendValue,
                 center_freq_hz: parseFrequencyInput(document.getElementById('center_freq_hz').value),
                 sample_rate_sps: parseFrequencyInput(document.getElementById('sample_rate_sps').value),
                 bb_shift_hz: parseFrequencyInput(document.getElementById('bb_shift_hz').value),
@@ -1250,6 +1262,7 @@ HTML_TEMPLATE = '''
 
         function resetDefaults() {
             // Загрузить значения по умолчанию
+            document.getElementById('backend_name').value = 'auto';
             document.getElementById('center_freq_hz').value = '406000000';
             document.getElementById('sample_rate_sps').value = '1000000';
             document.getElementById('bb_shift_hz').value = '-37000';
@@ -1276,6 +1289,7 @@ HTML_TEMPLATE = '''
                 }
 
                 // Загрузить значения из пресета
+                document.getElementById('backend_name').value = preset.backend_name || 'auto';
                 document.getElementById('center_freq_hz').value = preset.center_freq_hz || '';
                 document.getElementById('sample_rate_sps').value = preset.sample_rate_sps || '';
                 document.getElementById('bb_shift_hz').value = preset.bb_shift_hz || '';
@@ -1300,6 +1314,7 @@ HTML_TEMPLATE = '''
             try {
                 // Собрать текущую конфигурацию
                 const preset = {
+                    backend_name: document.getElementById('backend_name').value,
                     center_freq_hz: document.getElementById('center_freq_hz').value,
                     sample_rate_sps: document.getElementById('sample_rate_sps').value,
                     bb_shift_hz: document.getElementById('bb_shift_hz').value,
@@ -2258,6 +2273,18 @@ HTML_TEMPLATE = '''
             <!-- Radio Tab -->
             <div id="radioTab" class="tab-content active">
                 <div class="config-grid">
+                    <div class="config-row">
+                        <label>SDR Backend:</label>
+                        <select id="backend_name">
+                            <option value="auto">auto</option>
+                            <option value="soapy_rtl">soapy_rtl</option>
+                            <option value="soapy_hackrf">soapy_hackrf</option>
+                            <option value="soapy_airspy">soapy_airspy</option>
+                            <option value="soapy_sdrplay">soapy_sdrplay</option>
+                            <option value="rsa306">rsa306</option>
+                            <option value="file">file</option>
+                        </select>
+                    </div>
                     <div class="config-row">
                         <label>Center frequency (Hz):</label>
                         <input type="text" id="center_freq_hz" placeholder="406.000M">
