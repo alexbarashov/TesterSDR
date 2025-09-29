@@ -725,15 +725,22 @@ HTML_TEMPLATE = '''
 
         <!-- Правая панель -->
         <div class="right-panel">
-            <div class="stats-header">Current</div>
+            <div class="stats-header">Signal Parameters</div>
             <div class="stats-content" id="statsContent">
                 <table class="stats-table">
                     <tr><th>Parameter</th><th>Value</th></tr>
-                    <tr><td>DSP Status</td><td id="dsp-acquiring">—</td></tr>
-                    <tr><td>SDR Device</td><td id="sdr-device">—</td></tr>
-                    <tr><td>Sample Rate</td><td id="sample-rate">—</td></tr>
-                    <tr><td>RMS (dBm)</td><td id="current-rms">—</td></tr>
-                    <tr><td>CPU Usage</td><td id="cpu-usage">—</td></tr>
+                    <tr><td>Frequency, kHz</td><td id="signal-frequency">—</td></tr>
+                    <tr><td>+Phase deviation, rad</td><td id="signal-pos-phase">—</td></tr>
+                    <tr><td>−Phase deviation, rad</td><td id="signal-neg-phase">—</td></tr>
+                    <tr><td>Phase time rise, µs</td><td id="signal-rise-us">—</td></tr>
+                    <tr><td>Phase time fall, µs</td><td id="signal-fall-us">—</td></tr>
+                    <tr><td>Power, Wt</td><td id="signal-power">—</td></tr>
+                    <tr><td>Power rise, ms</td><td id="signal-power-rise">—</td></tr>
+                    <tr><td>Bit Rate, bps</td><td id="signal-baud">—</td></tr>
+                    <tr><td>Asymmetry, %</td><td id="signal-asymmetry">—</td></tr>
+                    <tr><td>CW Preamble, ms</td><td id="signal-preamble">—</td></tr>
+                    <tr><td>Total burst duration, ms</td><td id="signal-duration">—</td></tr>
+                    <tr><td>Repetition period, s</td><td id="signal-period">—</td></tr>
                 </table>
 
                 <div class="history-section">
@@ -742,8 +749,7 @@ HTML_TEMPLATE = '''
                         <!-- События будут добавляться JavaScript -->
                     </div>
                 </div>
-            </div>
-        </div>
+            </div>        </div>
     </div>
 
     <script>
@@ -909,6 +915,7 @@ HTML_TEMPLATE = '''
                 .then(data => {
                     if (data) {
                         updateDisplay(data);
+                        renderSignalParams(data);
                     }
                 })
                 .catch(error => {
@@ -928,25 +935,128 @@ HTML_TEMPLATE = '''
         }
 
         function updateCurrentStats(data) {
-            // Обновляем таблицу Current из /api/state
-            if (data.status) {
-                const acquiring = data.status.acquiring ? 'Running' : 'Stopped';
-                document.getElementById('dsp-acquiring').textContent = acquiring;
-
-                if (data.status.sdr) {
-                    document.getElementById('sdr-device').textContent = data.status.sdr;
-                }
-                if (data.status.fs) {
-                    document.getElementById('sample-rate').textContent = (data.status.fs / 1e6).toFixed(1) + ' MHz';
-                }
-            }
-
-            // Обновляем параметры если есть
+            // Обновляем параметры управления если есть
             if (data.status && data.status.thresh_dbm !== undefined) {
                 document.getElementById('thresh_dbm').value = data.status.thresh_dbm;
             }
             if (data.status && data.status.rms_win_ms !== undefined) {
                 document.getElementById('rms_win_ms').value = data.status.rms_win_ms;
+            }
+        }
+
+        function renderSignalParams(data) {
+            // Функция для отображения параметров сигнала в правой панели
+            if (!data) {
+                // Если данных нет - показываем прочерки
+                document.getElementById('signal-frequency').textContent = '—';
+                document.getElementById('signal-pos-phase').textContent = '—';
+                document.getElementById('signal-neg-phase').textContent = '—';
+                document.getElementById('signal-rise-us').textContent = '—';
+                document.getElementById('signal-fall-us').textContent = '—';
+                document.getElementById('signal-power').textContent = '—';
+                document.getElementById('signal-power-rise').textContent = '—';
+                document.getElementById('signal-baud').textContent = '—';
+                document.getElementById('signal-asymmetry').textContent = '—';
+                document.getElementById('signal-preamble').textContent = '—';
+                document.getElementById('signal-duration').textContent = '—';
+                document.getElementById('signal-period').textContent = '—';
+                return;
+            }
+
+            // 1. Frequency, kHz (406000 + offset/1000)
+            if (data.freq_hz !== undefined) {
+                const freqKhz = (406000 + data.freq_hz / 1000);
+                document.getElementById('signal-frequency').textContent = freqKhz.toFixed(3);
+            } else if (data.frequency_offset_hz !== undefined) {
+                const freqKhz = (406000 + data.frequency_offset_hz / 1000);
+                document.getElementById('signal-frequency').textContent = freqKhz.toFixed(3);
+            } else {
+                document.getElementById('signal-frequency').textContent = '406.037';
+            }
+
+            // 2. +Phase deviation, rad
+            if (data.pos_phase !== undefined) {
+                document.getElementById('signal-pos-phase').textContent = data.pos_phase.toFixed(2);
+            } else {
+                document.getElementById('signal-pos-phase').textContent = '—';
+            }
+
+            // 3. −Phase deviation, rad
+            if (data.neg_phase !== undefined) {
+                document.getElementById('signal-neg-phase').textContent = data.neg_phase.toFixed(2);
+            } else {
+                document.getElementById('signal-neg-phase').textContent = '—';
+            }
+
+            // 4. Phase time rise, µs
+            if (data.rise_us !== undefined) {
+                document.getElementById('signal-rise-us').textContent = data.rise_us.toFixed(1);
+            } else {
+                document.getElementById('signal-rise-us').textContent = '—';
+            }
+
+            // 5. Phase time fall, µs
+            if (data.fall_us !== undefined) {
+                document.getElementById('signal-fall-us').textContent = data.fall_us.toFixed(1);
+            } else {
+                document.getElementById('signal-fall-us').textContent = '—';
+            }
+
+            // 6. Power, Wt (если есть данные о мощности)
+            if (data.power_wt !== undefined) {
+                document.getElementById('signal-power').textContent = data.power_wt.toFixed(2);
+            } else if (data.p_wt !== undefined) {
+                document.getElementById('signal-power').textContent = data.p_wt.toFixed(2);
+            } else {
+                document.getElementById('signal-power').textContent = '—';
+            }
+
+            // 7. Power rise, ms (из rise_us -> ms)
+            if (data.rise_us !== undefined) {
+                const powerRiseMs = data.rise_us / 1000;
+                document.getElementById('signal-power-rise').textContent = powerRiseMs.toFixed(2);
+            } else if (data.prise_ms !== undefined) {
+                document.getElementById('signal-power-rise').textContent = data.prise_ms.toFixed(2);
+            } else {
+                document.getElementById('signal-power-rise').textContent = '—';
+            }
+
+            // 8. Bit Rate, bps
+            if (data.baud !== undefined) {
+                document.getElementById('signal-baud').textContent = data.baud.toFixed(0);
+            } else if (data.t_mod !== undefined && data.t_mod > 0) {
+                const baud = 1000000 / data.t_mod; // из микросекунд в биты/сек
+                document.getElementById('signal-baud').textContent = baud.toFixed(0);
+            } else {
+                document.getElementById('signal-baud').textContent = '—';
+            }
+
+            // 9. Asymmetry, %
+            if (data.asymmetry_pct !== undefined) {
+                document.getElementById('signal-asymmetry').textContent = data.asymmetry_pct.toFixed(1);
+            } else {
+                document.getElementById('signal-asymmetry').textContent = '—';
+            }
+
+            // 10. CW Preamble, ms
+            if (data.preamble_ms !== undefined) {
+                document.getElementById('signal-preamble').textContent = data.preamble_ms.toFixed(1);
+            } else {
+                document.getElementById('signal-preamble').textContent = '—';
+            }
+
+            // 11. Total burst duration, ms
+            if (data.length_ms !== undefined) {
+                document.getElementById('signal-duration').textContent = data.length_ms.toFixed(1);
+            } else {
+                document.getElementById('signal-duration').textContent = '—';
+            }
+
+            // 12. Repetition period, s (если доступно)
+            if (data.period_s !== undefined) {
+                document.getElementById('signal-period').textContent = data.period_s.toFixed(1);
+            } else {
+                document.getElementById('signal-period').textContent = '—';
             }
         }
 
