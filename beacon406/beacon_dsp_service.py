@@ -101,7 +101,7 @@ class Status:
     sdr: str
     fs: float
     bb_shift_hz: float
-    rms_win_ms: float
+    target_signal_hz: float
     thresh_dbm: float
     read_chunk: int
     queue_depth: int
@@ -305,7 +305,7 @@ class BeaconDSPService:
             sdr=str(getattr(self.backend, "driver", "?")),
             fs=float(self.sample_rate),
             bb_shift_hz=float(BB_SHIFT_HZ if BB_SHIFT_ENABLE else 0.0),
-            rms_win_ms=float(RMS_WIN_MS),
+            target_signal_hz=float(TARGET_SIGNAL_HZ),
             thresh_dbm=float(PULSE_THRESH_DBM),
             read_chunk=int(READ_CHUNK),
             queue_depth=len(self.pulse_queue),
@@ -652,7 +652,7 @@ class BeaconDSPService:
                         sdr=str(getattr(self.backend, "driver", "?")),
                         fs=float(self.sample_rate),
                         bb_shift_hz=float(BB_SHIFT_HZ if BB_SHIFT_ENABLE else 0.0),
-                        rms_win_ms=float(RMS_WIN_MS),
+                        target_signal_hz=float(TARGET_SIGNAL_HZ),
                         thresh_dbm=float(PULSE_THRESH_DBM),
                         read_chunk=int(READ_CHUNK),
                         queue_depth=len(self.pulse_queue),
@@ -666,9 +666,8 @@ class BeaconDSPService:
                     changed = {}
                     if "thresh_dbm" in msg:
                         PULSE_THRESH_DBM = float(msg["thresh_dbm"]); changed["thresh_dbm"] = PULSE_THRESH_DBM
-                    if "rms_win_ms" in msg:
-                        RMS_WIN_MS = float(msg["rms_win_ms"]); self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-                        changed["rms_win_ms"] = RMS_WIN_MS
+                    if "target_signal_hz" in msg:
+                        TARGET_SIGNAL_HZ = float(msg["target_signal_hz"]); changed["target_signal_hz"] = TARGET_SIGNAL_HZ
                     self.rep.send_json({"ok": True, "changed": changed})
                 elif cmd == "get_last_pulse":
                     # Возвращаем последние данные pulse с фазой и частотой
@@ -686,6 +685,50 @@ class BeaconDSPService:
                         self.rep.send_json({"ok": True, "path": str(fn)})
                     else:
                         self.rep.send_json({"ok": False, "err": "no_segment"})
+                elif cmd == "get_sdr_config":
+                    # Возвращаем текущую конфигурацию SDR
+                    config = {
+                        "center_freq_hz": self.backend.center_freq if hasattr(self.backend, 'center_freq') else 406000000,
+                        "sample_rate_sps": self.sample_rate,
+                        "bb_shift_enable": True,  # TODO: получить из NCO
+                        "bb_shift_hz": IF_OFFSET_HZ,
+                        "freq_corr_hz": 0,  # TODO: получить из backend
+                        "agc": False,  # TODO: получить из backend
+                        "gain_db": self.backend.gain if hasattr(self.backend, 'gain') else 30.0,
+                        "bias_t": False,  # TODO: получить из backend
+                        "antenna": "RX",  # TODO: получить из backend
+                        "device": getattr(self.backend, 'device_info', 'Unknown device')
+                    }
+                    self.rep.send_json({"ok": True, "config": config})
+                elif cmd == "set_sdr_config":
+                    # Применение конфигурации SDR
+                    config = msg.get('config', {})
+                    applied = {}
+                    retuned = False
+
+                    try:
+                        # Применяем параметры которые можно изменить без перезапуска
+                        if "gain_db" in config and hasattr(self.backend, 'set_gain'):
+                            self.backend.set_gain(float(config["gain_db"]))
+                            applied["gain_db"] = float(config["gain_db"])
+
+                        if "freq_corr_hz" in config and hasattr(self.backend, 'set_freq_correction'):
+                            self.backend.set_freq_correction(float(config["freq_corr_hz"]))
+                            applied["freq_corr_hz"] = float(config["freq_corr_hz"])
+
+                        # Параметры требующие ретюна сохраняем для информации
+                        if "center_freq_hz" in config:
+                            applied["center_freq_hz"] = float(config["center_freq_hz"])
+                            # TODO: реализовать ретюн без остановки потока
+
+                        if "sample_rate_sps" in config:
+                            applied["sample_rate_sps"] = float(config["sample_rate_sps"])
+                            # TODO: реализовать изменение sample rate
+
+                        self.rep.send_json({"ok": True, "applied": applied, "retuned": retuned})
+
+                    except Exception as e:
+                        self.rep.send_json({"ok": False, "error": str(e)})
                 else:
                     self.rep.send_json({"ok": False, "err": "unknown_cmd"})
             except Exception as e:

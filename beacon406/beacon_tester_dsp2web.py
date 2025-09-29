@@ -366,6 +366,63 @@ def api_last_pulse():
 
         return jsonify(result if result else None)
 
+@app.route('/api/sdr/get_config')
+def api_sdr_get_config():
+    """Получение текущей конфигурации SDR"""
+    try:
+        # Отправить запрос на получение конфигурации DSP сервису
+        response = send_dsp_command({'cmd': 'get_sdr_config'})
+        if response and response.get('ok'):
+            return jsonify(response.get('config', {}))
+        else:
+            # Возвратить конфигурацию по умолчанию если DSP сервис недоступен
+            return jsonify({
+                'center_freq_hz': 406000000,
+                'sample_rate_sps': 1000000,
+                'bb_shift_enable': True,
+                'bb_shift_hz': -37000,
+                'freq_corr_hz': 0,
+                'agc': False,
+                'gain_db': 30.0,
+                'bias_t': False,
+                'antenna': 'RX',
+                'device': 'Not connected'
+            })
+    except Exception as e:
+        log.error(f"Failed to get SDR config: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sdr/set_config', methods=['POST'])
+def api_sdr_set_config():
+    """Применение конфигурации SDR"""
+    try:
+        config_data = request.get_json()
+        if not config_data:
+            return jsonify({'ok': False, 'error': 'No config data provided'}), 400
+
+        # Отправить команду на изменение конфигурации
+        command = {
+            'cmd': 'set_sdr_config',
+            'config': config_data
+        }
+
+        response = send_dsp_command(command)
+        if response and response.get('ok'):
+            return jsonify({
+                'ok': True,
+                'applied': response.get('applied', {}),
+                'retuned': response.get('retuned', False)
+            })
+        else:
+            return jsonify({
+                'ok': False,
+                'error': response.get('error', 'Failed to apply SDR config')
+            }), 500
+
+    except Exception as e:
+        log.error(f"Failed to set SDR config: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 # === Полный HTML шаблон с адаптацией под DSP2Web ===
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -634,6 +691,139 @@ HTML_TEMPLATE = '''
         .history-entry.status {
             border-left: 3px solid #007bff;
         }
+
+        /* МОДАЛЬНОЕ ОКНО SDR CONFIG */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 0;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 800px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .modal-header {
+            background: linear-gradient(180deg, #7bb3d9 0%, #5a9bd4 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px 8px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        .close {
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .close:hover {
+            color: #ddd;
+        }
+
+        .modal-tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            background: #f8f9fa;
+        }
+
+        .tab-button {
+            flex: 1;
+            padding: 12px 16px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 14px;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .tab-button:hover {
+            background: #e9ecef;
+        }
+
+        .tab-button.active {
+            background: white;
+            border-bottom-color: #5a9bd4;
+            color: #5a9bd4;
+            font-weight: 600;
+        }
+
+        .tab-content {
+            display: none;
+            padding: 20px;
+            min-height: 400px;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .config-grid {
+            display: grid;
+            gap: 16px;
+        }
+
+        .config-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .config-row label {
+            min-width: 180px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .config-row input[type="text"],
+        .config-row input[type="number"],
+        .config-row select {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .config-row input[type="checkbox"] {
+            transform: scale(1.2);
+        }
+
+        .modal-footer {
+            padding: 16px 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            background: #f8f9fa;
+            border-radius: 0 0 8px 8px;
+        }
+
+        .preset-btn {
+            margin-right: auto;
+        }
     </style>
 </head>
 <body>
@@ -676,6 +866,12 @@ HTML_TEMPLATE = '''
                             <option value="100">100%</option>
                         </select>
                     </div>
+                    <div class="control-row">
+                        <label style="font-size: 12px;">
+                            <input type="checkbox" id="showLastDataOnSwitch" checked onchange="onShowLastDataToggle()">
+                            Show last data on view switch
+                        </label>
+                    </div>
                 </div>
             </div>
 
@@ -693,14 +889,17 @@ HTML_TEMPLATE = '''
                 <div class="section-header">PARAMS</div>
                 <div class="section-content">
                     <div class="control-row">
-                        <span>Thresh (dBm)</span>
-                        <input type="number" class="control-input" id="thresh_dbm" value="-45" step="0.1">
+                        <span>Target signal (Hz)</span>
+                        <input type="text" class="control-input" id="target_signal_hz" value="406037000" placeholder="406.037M">
                     </div>
                     <div class="control-row">
-                        <span>RMS Win (ms)</span>
-                        <input type="number" class="control-input" id="rms_win_ms" value="1.0" step="0.1">
+                        <span>Threshold (dBm)</span>
+                        <input type="number" class="control-input" id="thresh_dbm" value="-45" step="0.5" min="-120" max="0">
                     </div>
-                    <button class="button" onclick="applyParams()">Apply</button>
+                    <div class="control-row">
+                        <button class="button" onclick="applyParams()">Apply</button>
+                        <button class="button" onclick="openSDRConfig()">SDR…</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -730,6 +929,7 @@ HTML_TEMPLATE = '''
             <div class="stats-content" id="statsContent">
                 <table class="stats-table">
                     <tr><th>Parameter</th><th>Value</th></tr>
+                    <tr><td>Target freq, kHz</td><td id="target-frequency">—</td></tr>
                     <tr><td>Frequency, kHz</td><td id="signal-frequency">—</td></tr>
                     <tr><td>+Phase deviation, rad</td><td id="signal-pos-phase">—</td></tr>
                     <tr><td>−Phase deviation, rad</td><td id="signal-neg-phase">—</td></tr>
@@ -762,6 +962,7 @@ HTML_TEMPLATE = '''
         let currentView = 'phase';
         let currentTimeScale = 10;
         let eventSource = null;
+        let showLastDataOnSwitch = true; // Состояние чекбокса
 
         // === УПРАВЛЕНИЕ СОЕДИНЕНИЕМ ===
         function updateConnectionStatus(connected, zmqConnected = false) {
@@ -806,14 +1007,28 @@ HTML_TEMPLATE = '''
             eventSource.addEventListener('pulse', function(e) {
                 const data = JSON.parse(e.data);
                 logEvent('pulse', `Pulse: ${data.length_ms?.toFixed(1) || '?'}ms, ${data.peak_dbm?.toFixed(1) || '?'}dBm`);
-                loadLastPulse(); // Обновляем данные графика
+
+                // Умное обновление в зависимости от текущего режима просмотра
+                if (currentView === 'phase' || currentView === 'inburst_fr') {
+                    loadDataForView(currentView, true); // forceLoad для SSE событий
+                } else if (currentView === 'message' || currentView === 'sum_table') {
+                    loadLastPulse();
+                }
+                // Для остальных режимов не обновляем автоматически
             });
 
             eventSource.addEventListener('psk', function(e) {
                 const data = JSON.parse(e.data);
                 const status = data.ok ? 'OK' : 'FAIL';
                 logEvent('psk', `PSK ${status}: ${data.hex_length || 0} hex chars`);
-                loadLastPulse(); // Обновляем данные графика
+
+                // Умное обновление в зависимости от текущего режима просмотра
+                if (currentView === 'message' || currentView === 'sum_table') {
+                    loadLastPulse(); // PSK события особенно важны для сообщений
+                } else if (currentView === 'phase' || currentView === 'inburst_fr') {
+                    loadDataForView(currentView, true); // forceLoad для SSE событий
+                }
+                // Для остальных режимов не обновляем автоматически
             });
 
             eventSource.addEventListener('heartbeat', function(e) {
@@ -884,15 +1099,231 @@ HTML_TEMPLATE = '''
         }
 
         function applyParams() {
+            const targetSignalInput = document.getElementById('target_signal_hz').value;
+            const threshInput = document.getElementById('thresh_dbm').value;
+
+            // Парсинг target signal с поддержкой суффиксов
+            const targetSignalHz = parseFrequencyInput(targetSignalInput);
+            const threshDbm = parseFloat(threshInput);
+
+            if (isNaN(targetSignalHz) || isNaN(threshDbm)) {
+                logEvent('error', 'Invalid parameter values');
+                return;
+            }
+
             const params = {
-                thresh_dbm: parseFloat(document.getElementById('thresh_dbm').value),
-                rms_win_ms: parseFloat(document.getElementById('rms_win_ms').value)
+                target_signal_hz: targetSignalHz,
+                thresh_dbm: threshDbm
             };
 
             sendCommand('/api/control/params', params)
                 .then(result => {
                     logEvent('status', 'Parameters updated');
+                    // Обновить отображаемое значение Target в статусе
+                    updateTargetDisplay(targetSignalHz);
+                })
+                .catch(error => {
+                    logEvent('error', `Failed to update parameters: ${error.message}`);
                 });
+        }
+
+        // === ПАРСИНГ ЧАСТОТЫ С СУФФИКСАМИ ===
+        function parseFrequencyInput(input) {
+            if (!input) return NaN;
+
+            const trimmed = input.trim().toLowerCase();
+            let value = parseFloat(trimmed);
+
+            if (isNaN(value)) return NaN;
+
+            // Обработка суффиксов
+            if (trimmed.includes('ghz') || trimmed.includes('g')) {
+                value *= 1e9;
+            } else if (trimmed.includes('mhz') || trimmed.includes('m')) {
+                value *= 1e6;
+            } else if (trimmed.includes('khz') || trimmed.includes('k')) {
+                value *= 1e3;
+            }
+
+            return Math.round(value);
+        }
+
+        // === ОБНОВЛЕНИЕ ОТОБРАЖЕНИЯ TARGET ===
+        function updateTargetDisplay(targetHz) {
+            if (targetHz) {
+                // Обновить в строке статуса (MHz)
+                const beaconFreqElement = document.getElementById('beaconFreq');
+                if (beaconFreqElement) {
+                    const targetMHz = (targetHz / 1e6).toFixed(3);
+                    beaconFreqElement.textContent = targetMHz;
+                }
+
+                // Обновить в Signal Parameters (kHz)
+                const targetFreqElement = document.getElementById('target-frequency');
+                if (targetFreqElement) {
+                    const targetKHz = (targetHz / 1e3).toFixed(1);
+                    targetFreqElement.textContent = targetKHz;
+                }
+            }
+        }
+
+        // === ОТКРЫТИЕ SDR CONFIG ===
+        function openSDRConfig() {
+            loadSDRConfig();
+            document.getElementById('sdrModal').style.display = 'block';
+            logEvent('status', 'SDR Config modal opened');
+        }
+
+        function closeSDRConfig() {
+            document.getElementById('sdrModal').style.display = 'none';
+        }
+
+        function switchTab(tabName) {
+            // Скрыть все вкладки
+            document.getElementById('radioTab').classList.remove('active');
+            document.getElementById('recordingTab').classList.remove('active');
+
+            // Убрать активный класс со всех кнопок
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+
+            // Показать нужную вкладку
+            document.getElementById(tabName + 'Tab').classList.add('active');
+
+            // Активировать нужную кнопку
+            event.target.classList.add('active');
+        }
+
+        function loadSDRConfig() {
+            // Загрузить текущую конфигурацию SDR
+            fetch('/api/sdr/get_config')
+                .then(response => response.json())
+                .then(config => {
+                    document.getElementById('center_freq_hz').value = config.center_freq_hz || '';
+                    document.getElementById('sample_rate_sps').value = config.sample_rate_sps || '';
+                    document.getElementById('bb_shift_hz').value = config.bb_shift_hz || '';
+                    document.getElementById('bb_shift_enable').checked = config.bb_shift_enable || false;
+                    document.getElementById('freq_corr_hz').value = config.freq_corr_hz || '';
+                    document.getElementById('agc').checked = config.agc || false;
+                    document.getElementById('gain_db').value = config.gain_db || '';
+                    document.getElementById('bias_t').checked = config.bias_t || false;
+                    document.getElementById('antenna').value = config.antenna || 'RX';
+                    document.getElementById('device').value = config.device || 'Not detected';
+                })
+                .catch(error => {
+                    logEvent('error', `Failed to load SDR config: ${error.message}`);
+                });
+        }
+
+        function applySDRConfig() {
+            // Собрать данные из формы
+            const config = {
+                center_freq_hz: parseFrequencyInput(document.getElementById('center_freq_hz').value),
+                sample_rate_sps: parseFrequencyInput(document.getElementById('sample_rate_sps').value),
+                bb_shift_hz: parseFrequencyInput(document.getElementById('bb_shift_hz').value),
+                bb_shift_enable: document.getElementById('bb_shift_enable').checked,
+                freq_corr_hz: parseFrequencyInput(document.getElementById('freq_corr_hz').value),
+                agc: document.getElementById('agc').checked,
+                gain_db: parseFloat(document.getElementById('gain_db').value),
+                bias_t: document.getElementById('bias_t').checked,
+                antenna: document.getElementById('antenna').value
+            };
+
+            // Отправить конфигурацию
+            fetch('/api/sdr/set_config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.ok) {
+                    logEvent('status', 'SDR configuration applied' + (result.retuned ? ' (retuned)' : ''));
+                    closeSDRConfig();
+                } else {
+                    logEvent('error', `Failed to apply SDR config: ${result.error || 'Unknown error'}`);
+                }
+            })
+            .catch(error => {
+                logEvent('error', `Failed to apply SDR config: ${error.message}`);
+            });
+        }
+
+        function resetDefaults() {
+            // Загрузить значения по умолчанию
+            document.getElementById('center_freq_hz').value = '406000000';
+            document.getElementById('sample_rate_sps').value = '1000000';
+            document.getElementById('bb_shift_hz').value = '-37000';
+            document.getElementById('bb_shift_enable').checked = true;
+            document.getElementById('freq_corr_hz').value = '0';
+            document.getElementById('agc').checked = false;
+            document.getElementById('gain_db').value = '30';
+            document.getElementById('bias_t').checked = false;
+            document.getElementById('antenna').value = 'RX';
+        }
+
+        function loadPreset() {
+            const presetName = prompt('Enter preset name to load:');
+            if (!presetName) return;
+
+            try {
+                const presets = JSON.parse(localStorage.getItem('dsp2web.sdr.presets') || '{}');
+                const preset = presets[presetName];
+
+                if (!preset) {
+                    logEvent('error', `Preset '${presetName}' not found`);
+                    alert(`Preset '${presetName}' not found`);
+                    return;
+                }
+
+                // Загрузить значения из пресета
+                document.getElementById('center_freq_hz').value = preset.center_freq_hz || '';
+                document.getElementById('sample_rate_sps').value = preset.sample_rate_sps || '';
+                document.getElementById('bb_shift_hz').value = preset.bb_shift_hz || '';
+                document.getElementById('bb_shift_enable').checked = preset.bb_shift_enable || false;
+                document.getElementById('freq_corr_hz').value = preset.freq_corr_hz || '';
+                document.getElementById('agc').checked = preset.agc || false;
+                document.getElementById('gain_db').value = preset.gain_db || '';
+                document.getElementById('bias_t').checked = preset.bias_t || false;
+                document.getElementById('antenna').value = preset.antenna || 'RX';
+
+                logEvent('status', `Preset '${presetName}' loaded`);
+
+            } catch (error) {
+                logEvent('error', `Failed to load preset: ${error.message}`);
+            }
+        }
+
+        function savePreset() {
+            const presetName = prompt('Enter preset name to save:');
+            if (!presetName) return;
+
+            try {
+                // Собрать текущую конфигурацию
+                const preset = {
+                    center_freq_hz: document.getElementById('center_freq_hz').value,
+                    sample_rate_sps: document.getElementById('sample_rate_sps').value,
+                    bb_shift_hz: document.getElementById('bb_shift_hz').value,
+                    bb_shift_enable: document.getElementById('bb_shift_enable').checked,
+                    freq_corr_hz: document.getElementById('freq_corr_hz').value,
+                    agc: document.getElementById('agc').checked,
+                    gain_db: document.getElementById('gain_db').value,
+                    bias_t: document.getElementById('bias_t').checked,
+                    antenna: document.getElementById('antenna').value,
+                    saved_at: new Date().toISOString()
+                };
+
+                // Загрузить существующие пресеты
+                const presets = JSON.parse(localStorage.getItem('dsp2web.sdr.presets') || '{}');
+                presets[presetName] = preset;
+
+                // Сохранить обновленные пресеты
+                localStorage.setItem('dsp2web.sdr.presets', JSON.stringify(presets));
+
+                logEvent('status', `Preset '${presetName}' saved`);
+
+            } catch (error) {
+                logEvent('error', `Failed to save preset: ${error.message}`);
+            }
         }
 
         // === ОБНОВЛЕНИЕ СОСТОЯНИЯ ===
@@ -940,8 +1371,9 @@ HTML_TEMPLATE = '''
             if (data.status && data.status.thresh_dbm !== undefined) {
                 document.getElementById('thresh_dbm').value = data.status.thresh_dbm;
             }
-            if (data.status && data.status.rms_win_ms !== undefined) {
-                document.getElementById('rms_win_ms').value = data.status.rms_win_ms;
+            if (data.status && data.status.target_signal_hz !== undefined) {
+                document.getElementById('target_signal_hz').value = data.status.target_signal_hz;
+                updateTargetDisplay(data.status.target_signal_hz);
             }
         }
 
@@ -1137,6 +1569,7 @@ HTML_TEMPLATE = '''
 
             const titleEl = document.getElementById('chartTitle');
 
+            // Обновляем заголовок
             switch(viewType) {
                 case 'phase':
                     titleEl.textContent = 'Fig.8 Phase';
@@ -1161,8 +1594,72 @@ HTML_TEMPLATE = '''
                     break;
             }
 
-            // Перерисовываем график с новым видом
-            loadLastPulse();
+            // МГНОВЕННО рендерим пустой шаблон
+            renderEmptyTemplate(viewType);
+
+            // Затем асинхронно загружаем данные
+            loadDataForView(viewType);
+        }
+
+        // === СПЕЦИАЛИЗИРОВАННЫЕ ЗАГРУЗЧИКИ ===
+        function loadDataForView(viewType, forceLoad = false) {
+            console.log('Loading data for view:', viewType, 'forceLoad:', forceLoad);
+
+            // Проверяем настройку "Show last data on view switch"
+            if (!forceLoad && !showLastDataOnSwitch) {
+                console.log('Skipping data load - showLastDataOnSwitch is disabled');
+                return; // Оставляем пустой шаблон
+            }
+
+            if (viewType === 'phase' || viewType === 'inburst_fr') {
+                // Графики фазы и частоты - загружаем из pulse данных
+                loadGraphData(viewType);
+            } else if (viewType === 'message' || viewType === 'sum_table') {
+                // Сообщения и таблицы - загружаем общие pulse данные
+                loadLastPulse();
+            } else if (viewType === '121_data') {
+                // Данные 121 МГц - специальный эндпоинт (пока заглушка)
+                load121Data();
+            } else {
+                // Остальные режимы - общая загрузка
+                loadLastPulse();
+            }
+        }
+
+        function loadGraphData(viewType) {
+            // Для графиков используем текущий time scale
+            const span_ms = currentTimeScale * 10; // currentTimeScale это ms/div
+
+            fetch('/api/last_pulse')
+                .then(response => response.json())
+                .then(data => {
+                    if (data) {
+                        // Фильтруем данные по типу графика
+                        if (viewType === 'phase' && data.phase_xs_ms && data.phase_ys_rad) {
+                            drawPhaseView(data);
+                        } else if (viewType === 'inburst_fr' && data.fr_xs_ms && data.fr_ys_hz) {
+                            drawInburstFRView(data);
+                        } else {
+                            // Если данных нет, оставляем пустой шаблон
+                            console.log('No data available for', viewType);
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading graph data:', error);
+                });
+        }
+
+        function load121Data() {
+            // Заглушка для данных 121 МГц
+            console.log('121 MHz data not implemented yet');
+            // Оставляем пустой шаблон
+        }
+
+        function onShowLastDataToggle() {
+            const checkbox = document.getElementById('showLastDataOnSwitch');
+            showLastDataOnSwitch = checkbox.checked;
+            console.log('Show last data on switch:', showLastDataOnSwitch);
         }
 
         function onTimeScaleChange() {
@@ -1170,8 +1667,13 @@ HTML_TEMPLATE = '''
             currentTimeScale = parseInt(select.value);
             console.log('Time scale changed to:', currentTimeScale + '%');
 
-            // Перерисовываем график с новым масштабом
-            loadLastPulse();
+            // Для графиков фазы и частоты перезагружаем с новым масштабом
+            if (currentView === 'phase' || currentView === 'inburst_fr') {
+                loadDataForView(currentView);
+            } else {
+                // Для остальных режимов используем общую загрузку
+                loadLastPulse();
+            }
         }
 
         // === РИСОВАНИЕ ГРАФИКОВ ===
@@ -1564,6 +2066,152 @@ HTML_TEMPLATE = '''
             ctx.fillText('This view requires dedicated 121.5 MHz hardware', canvas.width / 2, canvas.height / 2 + 20);
         }
 
+        // === ПУСТЫЕ ШАБЛОНЫ ===
+        function renderEmptyTemplate(viewType) {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            ctx.clearRect(0, 0, width, height);
+
+            if (viewType === 'phase' || viewType === 'inburst_fr' ||
+                viewType === 'fr_stability' || viewType === 'ph_rise_fall') {
+                renderEmptyGraphTemplate(viewType);
+            } else if (viewType === 'message' || viewType === 'sum_table' || viewType === '121_data') {
+                renderEmptyTableTemplate(viewType);
+            }
+        }
+
+        function renderEmptyGraphTemplate(viewType) {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // Сетка
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+
+            // Горизонтальные линии
+            for (let i = 0; i <= 10; i++) {
+                const y = (height / 10) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Вертикальные линии
+            for (let i = 0; i <= 8; i++) {
+                const x = (width / 8) * i;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+            }
+
+            // Центральная линия для графиков
+            if (viewType === 'phase' || viewType === 'inburst_fr') {
+                ctx.strokeStyle = '#adb5bd';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(0, height / 2);
+                ctx.lineTo(width, height / 2);
+                ctx.stroke();
+            }
+
+            // Специальные линии для фазы
+            if (viewType === 'phase') {
+                ctx.strokeStyle = '#FF0000';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+
+                const phaseScale = 1.25;
+                const y_plus_1_1 = height / 2 - (1.1 / phaseScale) * (height / 2);
+                ctx.beginPath();
+                ctx.moveTo(0, y_plus_1_1);
+                ctx.lineTo(width, y_plus_1_1);
+                ctx.stroke();
+
+                const y_minus_1_1 = height / 2 + (1.1 / phaseScale) * (height / 2);
+                ctx.beginPath();
+                ctx.moveTo(0, y_minus_1_1);
+                ctx.lineTo(width, y_minus_1_1);
+                ctx.stroke();
+
+                ctx.setLineDash([]);
+
+                // Y-axis метки для фазы
+                ctx.fillStyle = '#6c757d';
+                ctx.font = '10px Arial';
+                ctx.fillText('+' + phaseScale.toFixed(2) + ' rad', 5, 15);
+                ctx.fillText('0', 5, height / 2 + 4);
+                ctx.fillText('-' + phaseScale.toFixed(2) + ' rad', 5, height - 10);
+            }
+
+            // Сообщение ожидания
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Waiting for data...', width / 2, height / 2 - 30);
+            ctx.font = '12px Arial';
+            ctx.fillText('Switch to acquisition mode to see live data', width / 2, height / 2 - 10);
+            ctx.textAlign = 'left';
+        }
+
+        function renderEmptyTableTemplate(viewType) {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // Фон
+            ctx.fillStyle = '#f8f9fa';
+            ctx.fillRect(0, 0, width, height);
+
+            // Заголовок
+            ctx.fillStyle = '#333';
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'center';
+
+            let title = '';
+            switch(viewType) {
+                case 'message': title = 'Message Decode'; break;
+                case 'sum_table': title = 'Summary Table'; break;
+                case '121_data': title = '121.5 MHz Data'; break;
+            }
+            ctx.fillText(title, width / 2, 30);
+
+            // Рамка для таблицы
+            ctx.strokeStyle = '#dee2e6';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(20, 50, width - 40, height - 100);
+
+            // Заголовок таблицы
+            ctx.fillStyle = '#e9ecef';
+            ctx.fillRect(20, 50, width - 40, 30);
+
+            ctx.fillStyle = '#495057';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'left';
+
+            if (viewType === 'message') {
+                ctx.fillText('Field', 30, 70);
+                ctx.fillText('Value', width / 2, 70);
+            } else if (viewType === 'sum_table') {
+                ctx.fillText('Parameter', 30, 70);
+                ctx.fillText('Value', width / 2, 70);
+                ctx.fillText('Units', width - 100, 70);
+            } else if (viewType === '121_data') {
+                ctx.fillText('121.5 MHz Parameter', 30, 70);
+                ctx.fillText('Status', width - 150, 70);
+            }
+
+            // Сообщение ожидания
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Waiting for data...', width / 2, height / 2 + 20);
+            ctx.font = '12px Arial';
+            ctx.fillText('Data will appear here when available', width / 2, height / 2 + 40);
+            ctx.textAlign = 'left';
+        }
+
         // === ИНИЦИАЛИЗАЦИЯ ===
         function initialize() {
             console.log('Initializing DSP2Web Full UI client...');
@@ -1584,7 +2232,114 @@ HTML_TEMPLATE = '''
         // Обработчики событий
         window.addEventListener('resize', resizeCanvas);
         document.addEventListener('DOMContentLoaded', initialize);
+
+        // Закрытие модального окна при клике вне его
+        window.addEventListener('click', function(event) {
+            const modal = document.getElementById('sdrModal');
+            if (event.target === modal) {
+                closeSDRConfig();
+            }
+        });
     </script>
+
+    <!-- SDR Config Modal -->
+    <div id="sdrModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>SDR Configuration</h2>
+                <span class="close" onclick="closeSDRConfig()">&times;</span>
+            </div>
+
+            <div class="modal-tabs">
+                <button class="tab-button active" onclick="switchTab('radio')">Radio</button>
+                <button class="tab-button" onclick="switchTab('recording')">Recording</button>
+            </div>
+
+            <!-- Radio Tab -->
+            <div id="radioTab" class="tab-content active">
+                <div class="config-grid">
+                    <div class="config-row">
+                        <label>Center frequency (Hz):</label>
+                        <input type="text" id="center_freq_hz" placeholder="406.000M">
+                    </div>
+                    <div class="config-row">
+                        <label>Sample rate (S/s):</label>
+                        <input type="text" id="sample_rate_sps" placeholder="1M">
+                    </div>
+                    <div class="config-row">
+                        <label>Baseband shift (Hz):</label>
+                        <input type="text" id="bb_shift_hz" placeholder="-37k">
+                        <label style="margin-left: 10px;">
+                            <input type="checkbox" id="bb_shift_enable"> Enable
+                        </label>
+                    </div>
+                    <div class="config-row">
+                        <label>Frequency correction (Hz):</label>
+                        <input type="text" id="freq_corr_hz" placeholder="0">
+                    </div>
+                    <div class="config-row">
+                        <label>
+                            <input type="checkbox" id="agc"> AGC
+                        </label>
+                    </div>
+                    <div class="config-row">
+                        <label>Manual gain (dB):</label>
+                        <input type="number" id="gain_db" step="0.5" min="0" max="60">
+                    </div>
+                    <div class="config-row">
+                        <label>
+                            <input type="checkbox" id="bias_t"> Bias-T
+                        </label>
+                    </div>
+                    <div class="config-row">
+                        <label>Antenna/Port:</label>
+                        <select id="antenna">
+                            <option value="RX">RX</option>
+                            <option value="TX">TX</option>
+                        </select>
+                    </div>
+                    <div class="config-row">
+                        <label>Device/Driver:</label>
+                        <input type="text" id="device" readonly>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recording Tab -->
+            <div id="recordingTab" class="tab-content">
+                <div class="config-grid">
+                    <div class="config-row">
+                        <label>
+                            <input type="checkbox" id="sigmf_save"> SigMF save
+                        </label>
+                    </div>
+                    <div class="config-row">
+                        <label>Path / Filename pattern:</label>
+                        <input type="text" id="sigmf_path" placeholder="./captures/recording_YYYYMMDD_HHMMSS.sigmf-data">
+                    </div>
+                    <div class="config-row">
+                        <label>Datatype:</label>
+                        <select id="sigmf_datatype">
+                            <option value="cf32">cf32 (Complex Float32)</option>
+                            <option value="ci16">ci16 (Complex Int16)</option>
+                        </select>
+                    </div>
+                    <div class="config-row">
+                        <label>Chunk size (MB):</label>
+                        <input type="number" id="sigmf_chunk_mb" value="100" min="1" max="1000">
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="button preset-btn" onclick="loadPreset()">Load Preset</button>
+                <button class="button preset-btn" onclick="savePreset()">Save Preset</button>
+                <button class="button" onclick="resetDefaults()">Defaults</button>
+                <button class="button primary" onclick="applySDRConfig()">Apply</button>
+                <button class="button" onclick="closeSDRConfig()">Cancel</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 '''
