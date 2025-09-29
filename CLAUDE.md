@@ -18,7 +18,7 @@ TesterSDR — это приложение для программно-опред
 
 ```bash
 # Запуск веб-интерфейса (рекомендуется для большинства задач)
-python beacon406/beacon_tester_web.py  # Открывается на http://127.0.0.1:8738/
+python beacon406/beacon_tester_dsp2web.py  # Открывается на http://127.0.0.1:8738/
 
 # Или используйте Windows batch-файл
 app.bat  # Запускает веб-интерфейс и автоматически открывает браузер
@@ -35,6 +35,10 @@ python beacon_tester_gui.py
 
 # Запуск GUI передатчика PSK406
 python beacon406/apps/gen/ui_psk406_tx.py
+
+# DSP-сервис с веб-интерфейсом (микросервисная архитектура)
+python beacon406/beacon_dsp_service.py --pub tcp://127.0.0.1:8781 --rep tcp://127.0.0.1:8782
+python beacon406/beacon_tester_web_dsp_only.py  # Клиент для DSP-сервиса
 ```
 
 ### Запуск приложений с визуализацией
@@ -73,7 +77,10 @@ python beacon406/apps/epirb_hex_decoder.py
 - `beacon406-plot.py` - Основное приложение визуализации с real-time обработкой, RMS-анализом и PSK-демодуляцией
 - `beacon406_PSK_FM-plot.py` - Расширенная версия с поддержкой FM демодуляции
 - `beacon_tester_gui.py` - PySide6/Qt GUI со спектром, водопадом, PSK-демодуляцией
-- `beacon_tester_web.py` - Веб-интерфейс Flask (порт 8738) с загрузкой CF32 файлов
+- `beacon_tester_web.py` - Веб-интерфейс Flask (порт 8738) с загрузкой CF32 файлов (удален)
+- `beacon_tester_dsp2web.py` - Монолитный веб-интерфейс с встроенной DSP обработкой (порт 8738)
+- `beacon_tester_web_dsp_only.py` - Веб-клиент для отдельного DSP-сервиса (порт 8738)
+- `beacon_dsp_service.py` - Headless DSP-движок с ZeroMQ IPC (порты 8781-8782)
 
 **beacon406/lib/** - Библиотеки обработки:
 - `backends.py` - Унифицированный слой SDR абстракции (RTL-SDR, HackRF, Airspy, SDRPlay, RSA306)
@@ -84,6 +91,7 @@ python beacon406/apps/epirb_hex_decoder.py
 - `processing_fm.py` - FM демодуляция и обработка
 - `config.py` - Настройка SDR бэкенда
 - `hex_decoder.py` - Декодер EPIRB/COSPAS-SARSAT сообщений
+- `logger.py` - Централизованная система логирования
 
 **beacon406/apps/** - Утилиты и тесты:
 - `epirb_hex_decoder.py` - Автономный декодер EPIRB HEX
@@ -95,6 +103,11 @@ python beacon406/apps/epirb_hex_decoder.py
   - `ui_psk406_tx.py` - GUI передатчика
   - `make_multitone_156mhz.py` - Многотональные тестовые сигналы
   - `406_msg_send_4sec.bat` - Циклическая передача HackRF
+  - `406_send_once.bat` - Однократная передача сигнала
+  - `HackRF_tx.bat` - Прямая передача через hackrf_transfer
+  - `ui_psk406.bat` - Запуск GUI передатчика
+  - `ui_psk406_con.bat` - Запуск GUI с консольным режимом
+  - `ui_psk406_con_tx.py` - Консольная версия передатчика
 
 **captures/** - CF32 IQ записи (исключен из Git)
 **captures/uploads/** - Файлы веб-загрузок
@@ -107,10 +120,28 @@ python beacon406/apps/epirb_hex_decoder.py
 - Калибровочные смещения в `SDR_CALIB_OFFSETS_DB`
 - Оптимальные частоты дискретизации в `SDR_DEFAULT_HW_SR`
 
-#### SigIO бэкенд (backends_sigio.py + sigio.py)
+#### SigIO бэкенд (sigio.py)
 - Архитектура с улучшенной буферизацией
 - Поддержка SigMF формата для записи/воспроизведения
 - Оптимизированная обработка потоков данных с полифазной децимацией
+
+### DSP-сервис архитектура
+
+#### beacon_dsp_service.py
+- Headless DSP-движок без GUI и Flask
+- Кольцевой буфер IQ с NCO (baseband shift)
+- Скользящее RMS (1 мс окно) с детекцией импульсов
+- Детектор с OFF-HANG (защита от дробления)
+- PSK демодуляция и метрики через lib.metrics/lib.demod
+- ZeroMQ PUB для событий (status/pulse/psk) на порту 8781
+- ZeroMQ REP для команд (start/stop/set_params) на порту 8782
+- Опциональная запись JSONL-сессии
+
+#### Клиент-серверное взаимодействие
+- beacon_tester_web_dsp_only.py подключается к DSP-сервису через ZeroMQ
+- Подписка на PUB канал для получения событий в реальном времени
+- REP канал для управления DSP (старт/стоп, параметры)
+- Веб-интерфейс обновляется асинхронно от DSP событий
 
 ### Конфигурация бэкенда
 
@@ -146,7 +177,7 @@ BACKEND_ARGS = r"C:/work/TesterSDR/captures/your_recording.cf32"
 
 ## Веб-интерфейс
 
-### Маршруты API (beacon_tester_web.py)
+### Маршруты API (beacon_tester_dsp2web.py)
 - `GET /` - Главная страница
 - `POST /api/upload` - Загрузка CF32 файлов
 - `GET /api/status` - Текущие метрики и SDR информация
@@ -170,6 +201,7 @@ pip install numpy matplotlib pyqtgraph PySide6 scipy flask werkzeug
 pip install SoapySDR  # Для SDR устройств
 pip install pyrtlsdr  # Для прямой поддержки RTL-SDR
 pip install pyVISA    # Для Tektronix RSA306
+pip install pyzmq     # Для DSP-сервиса с ZeroMQ IPC (опционально)
 ```
 
 ## Важные параметры
@@ -195,6 +227,7 @@ pip install pyVISA    # Для Tektronix RSA306
 - Пути используют прямые слеши: `C:/work/TesterSDR/`
 - Python путь в batch файлах: `C:\Users\alexb\AppData\Local\Programs\Python\Python39\python.exe`
 - Порты Flask: 8737-8740 (освобождаются через stop_flask.bat)
+- Порты ZeroMQ DSP-сервиса: 8781 (PUB), 8782 (REP)
 - Все сервисы привязаны к 127.0.0.1 (localhost)
 
 ## Форматы файлов

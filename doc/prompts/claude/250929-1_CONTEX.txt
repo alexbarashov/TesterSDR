@@ -1,0 +1,215 @@
+
+# ТЗ v2 — «beacon_tester_dsp2web» как тонкий клиент к `beacon_dsp_service.py` (single-file)
+
+## 0) Итоговая цель
+
+* Полностью удалить локальную DSP/SDR-логику из `beacon_tester_dsp2web.py`.
+* Подключить WebUI к внешнему движку `beacon_dsp_service.py`:
+
+  * **SUB** к `PUB`: получать события `status`, `pulse`, `psk` (JSON strings).
+  * **REQ** к `REP`: отправлять команды `start_acquire`, `stop_acquire`, `set_params`, `save_sigmf`, `get_status`.
+* Всё хранение состояния и IPC — **внутри одного файла** `beacon_tester_dsp2web.py` (без `dsp_ipc.py` и `state_bus.py`).
+
+---
+
+## 1) Адреса и конфигурация (строго как в сервисе)
+
+* PUB/REP по умолчанию:
+  `tcp://127.0.0.1:8781` (PUB), `tcp://127.0.0.1:8782` (REP).
+* ENV (как в сервисе):
+  `DSP_PUB` → адрес SUB; `DSP_REP` → адрес REQ.
+* CLI флаги WebUI (допустимо): `--pub`, `--rep`, `--host`, `--port`.
+  Приоритет: CLI → ENV → дефолт.
+
+---
+
+## 2) События по SUB: форматы (как в датаклассах сервиса)
+
+Сервис публикует JSON (поле `type` обязательно):
+
+### `type="status"`
+
+```json
+{
+  "type": "status",
+  "sdr": "soapy_rtl",
+  "fs": 1000000.0,
+  "bb_shift_hz": -37000.0,
+  "rms_win_ms": 1.0,
+  "thresh_dbm": -45.0,
+  "read_chunk": 65536,
+  "queue_depth": 0,
+  "cpu": 0.0
+}
+```
+
+### `type="pulse"`
+
+```json
+{
+  "type": "pulse",
+  "start_abs": 12345678,
+  "length_ms": 520.0,
+  "peak_dbm": -32.4,
+  "above_thresh_ratio": 0.86
+}
+```
+
+### `type="psk"`
+
+```json
+{
+  "type": "psk",
+  "start_abs": 12345678,
+  "length_ms": 520.0,
+  "ok": true,
+  "preamble_ms": 2.3,
+  "baud": 400.75,
+  "pos_phase": 0.78,
+  "neg_phase": -0.79,
+  "rise_us": 82.0,
+  "fall_us": 79.0,
+  "asymmetry_pct": 3.1,
+  "hex": "1ACF...FF"
+}
+```
+
+> Примечание: сервис может дополнять события диагностикой; WebUI должен быть толерантен к лишним полям. Большие массивы (фаза/FM) **не слать по SSE**, отдавать по `GET /api/last_pulse` (см. §4).
+
+---
+
+## 3) Команды по REQ (строго по именам из сервиса)
+
+Отправляем JSON через REQ→REP, ответы — JSON:
+
+* `{"cmd": "start_acquire"}` → `{"ok": true|false, ...}`
+* `{"cmd": "stop_acquire"}`
+* `{"cmd": "get_status"}`
+* `{"cmd": "save_sigmf"}`
+* `{"cmd": "set_params", ...}` — **важно:** сервис ожидает «плоский» словарь параметров в том же объекте, а не вложенное `args`. Т.е. правильно так:
+
+  ```json
+  {"cmd":"set_params","thresh_dbm":-44.5,"rms_win_ms":1.0,"bb_shift_hz":-37000}
+  ```
+
+  а не `{"cmd":"set_params","args":{...}}`.
+
+Таймаут REQ ≈ 2000 мс, до 3 ретраев; на ошибки возвращать `{"ok": false, "err": "..."}`.
+
+---
+
+## 4) Эндпоинты WebUI (синхронизированы с подсказками внутри сервиса)
+
+Реализовать в `beacon_tester_dsp2web.py`:
+
+1. `GET /api/state`
+   Возвращает агрегат, как в примере внутри `beacon_dsp_service.py`:
+
+   ```json
+   {
+     "status": { ... } | {},
+     "last_pulse": { ... } | null,
+     "last_psk": { ... } | null,
+     "log": [ ... ]  // короткая лента последних событий, max ≈ 64
+   }
+   ```
+
+   Внутри WebUI поддерживать `DSP_STATE`-подобную структуру:
+
+   * `status: dict`
+   * `pulse: dict | None` (последний)
+   * `psk: dict | None` (последний)
+   * `log: deque maxlen=64` (карточки событий)
+
+2. **Управление** (ровно как подсказывает сервис):
+
+   * `POST /api/control/start`  → `{"cmd":"start_acquire"}`
+   * `POST /api/control/stop`   → `{"cmd":"stop_acquire"}`
+   * `POST /api/control/params` → `{"cmd":"set_params", <пары ключ-значение>}`
+   * `POST /api/control/save_sigmf` → `{"cmd":"save_sigmf"}`
+
+3. (Опционально) `GET /api/events` — **SSE**:
+
+   * Формат: `event: <type>\ndata: <json>\n\n`
+   * Пихать только компактные события (`status`, краткий `pulse`, краткий `psk`).
+   * Большие массивы — не через SSE.
+
+4. `GET /api/last_pulse` (если хотим графики):
+   Отдаёт подробный объект последнего импульса/PSK (включая массивы, если сервис их шлёт/копит). Это endpoint «по запросу», чтобы не грузить канал постоянно.
+
+5. `GET /api/health`
+
+   ```json
+   {
+     "ok": true|false,
+     "zmq_connected": true|false,   // эвристика: был ли status за последние 5–10 с
+     "pub_addr": "...",
+     "rep_addr": "..."
+   }
+   ```
+
+---
+
+## 5) Что удалить из `beacon_tester_dsp2web.py`
+
+* Любые импорты и вызовы локального DSP:
+
+  * `from lib.backends import safe_make_backend`
+  * `from lib.metrics import process_psk_impulse`
+  * `from lib.demod import phase_demod_psk_msg_safe`
+  * `from lib.processing_fm import fm_discriminator` (и любые `processing_fm` функции)
+  * Чтение/запись **cf32/SigMF** на стороне WebUI (с этим работает сервис).
+* Кнопки/эндпоинты «init SDR», «file mode», локальные демодуляторы, локальные графики «из буфера» — **убрать**.
+* В `app.run` — отключить ре-лоадер и дебаг; предпочтительно использовать `waitress` как в примере сервиса.
+
+---
+
+## 6) Потоки, очереди, устойчивость
+
+* Один фон-поток **SUB**:
+
+  * `zmq.SUBSCRIBE ""`, авто-переподключение (бекофф 0.5→5 с).
+  * Разбор JSON; по `type` обновлять `status`/`pulse`/`psk`; пушить компактное событие в лог и SSE-очередь.
+* Один **REQ**-клиент с мьютексом и таймаутами (создавать на первый запрос; `RCVTIMEO`/`SNDTIMEO` ~2000 мс).
+* Очереди:
+
+  * `log` — `deque(maxlen=64)`
+  * `events_q` для SSE — `queue(maxsize=100)`; при переполнении удалять самый старый и класть новый.
+* Все общие структуры — под `threading.Lock()`.
+
+---
+
+## 7) Фронтенд
+
+* Оставить существующую страницу, но источники данных — только REST/SSE:
+
+  * Кнопки **Start/Stop** → `POST /api/control/start|stop`.
+  * Настройки (threshold, rms_win_ms, bb_shift_hz и др.) → `POST /api/control/params` (плоский словарь).
+  * Таблица событий — из `GET /api/state` (`log`) и/или `/api/events`.
+  * Графики (если нужны) — подтягивать подробности по `GET /api/last_pulse`.
+
+---
+
+## 8) Тест-план (минимально воспроизводимый)
+
+1. Старт сервиса:
+   `python beacon_dsp_service.py --pub tcp://127.0.0.1:8781 --rep tcp://127.0.0.1:8782`
+2. Старт WebUI на те же адреса (CLI или ENV).
+3. `GET /api/health` → `ok:true`, а после первого `status` → `zmq_connected:true`.
+4. `POST /api/control/get_status` (можно через `{"cmd":"get_status"}` отдельно или кнопкой «Статус») — получить ответ сервиса.
+5. `POST /api/control/start` → наблюдать поток событий, обновления `/api/state`.
+6. `POST /api/control/params` → изменить `thresh_dbm`, `rms_win_ms`, `bb_shift_hz` и т.п.; проверить что сервис применяет.
+7. `POST /api/control/stop` → поток импульсов прекращается.
+8. Перезапустить сервис в процессе — SUB-поток WebUI должен переподключиться (без падений).
+
+---
+
+## 9) Критерии приёмки
+
+* В `beacon_tester_dsp2web.py` **нет** импортов/вызовов локального DSP/SDR.
+* Эндпоинты `/api/state`, `/api/control/*`, `/api/health` работают как описано; команды именуются **точно**: `start_acquire`/`stop_acquire`/`set_params`/`save_sigmf`/`get_status`.
+* SSE (если включили) не «таскает» большие массивы.
+* Автопереподключение SUB, корректная обработка таймаутов REQ.
+* В `README`/шапке файла — как запустить сервис и WebUI (с ENV/CLI примерами).
+
+-
