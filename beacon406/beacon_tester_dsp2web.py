@@ -652,6 +652,7 @@ HTML_TEMPLATE = '''
                 <div class="section-content">
                     <div class="radio-group">
                         <label><input type="radio" name="view" value="phase" checked onchange="changeView('phase')"> 406 Phase</label>
+                        <label><input type="radio" name="view" value="inburst_fr" onchange="changeView('inburst_fr')"> 406 in-burst FR</label>
                         <label><input type="radio" name="view" value="fr_stability" onchange="changeView('fr_stability')"> 406 Fr. stability</label>
                         <label><input type="radio" name="view" value="ph_rise_fall" onchange="changeView('ph_rise_fall')"> 406 Ph/Rise/Fall</label>
                         <label><input type="radio" name="view" value="message" onchange="changeView('message')"> Message</label>
@@ -1140,6 +1141,9 @@ HTML_TEMPLATE = '''
                 case 'phase':
                     titleEl.textContent = 'Fig.8 Phase';
                     break;
+                case 'inburst_fr':
+                    titleEl.textContent = 'Fig.10 Inburst Frequency';
+                    break;
                 case 'fr_stability':
                     titleEl.textContent = 'Frequency Stability';
                     break;
@@ -1192,7 +1196,12 @@ HTML_TEMPLATE = '''
                 drawSummaryView(data);
             } else if (currentView === '121_data') {
                 draw121View(data);
+            } else if (currentView === 'phase') {
+                drawPhaseView(data);
+            } else if (currentView === 'inburst_fr') {
+                drawInburstFRView(data);
             } else {
+                // Для остальных режимов используем базовый вид фазы
                 drawPhaseView(data);
             }
         }
@@ -1205,34 +1214,85 @@ HTML_TEMPLATE = '''
             ctx.strokeStyle = '#e9ecef';
             ctx.lineWidth = 1;
 
-            // Горизонтальные линии
-            for (let y = 0; y <= height; y += height / 10) {
+            // Горизонтальные линии (10 делений)
+            for (let i = 0; i <= 10; i++) {
+                const y = (height / 10) * i;
                 ctx.beginPath();
                 ctx.moveTo(0, y);
                 ctx.lineTo(width, y);
                 ctx.stroke();
             }
 
-            // Вертикальные линии
-            for (let x = 0; x <= width; x += width / 10) {
+            // Вертикальные линии (8 делений для времени)
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '10px Arial';
+            for (let i = 0; i <= 8; i++) {
+                const x = (width / 8) * i;
                 ctx.beginPath();
                 ctx.moveTo(x, 0);
                 ctx.lineTo(x, height);
                 ctx.stroke();
+
+                // Временные метки
+                if (data && data.phase_xs_ms && data.phase_xs_ms.length > 0) {
+                    const timeRange = data.phase_xs_ms[data.phase_xs_ms.length - 1] - data.phase_xs_ms[0];
+                    const timeMs = (data.phase_xs_ms[0] + i * timeRange / 8).toFixed(1);
+                    ctx.fillText(timeMs + ' ms', x - 15, height - 5);
+                }
             }
 
+            // Нулевая линия
+            ctx.strokeStyle = '#adb5bd';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, height / 2);
+            ctx.lineTo(width, height / 2);
+            ctx.stroke();
+
+            // Пунктирные линии на ±1.1 радиан
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+
+            const phaseScale = 1.25; // радиан
+            const y_plus_1_1 = height / 2 - (1.1 / phaseScale) * (height / 2);
+            ctx.beginPath();
+            ctx.moveTo(0, y_plus_1_1);
+            ctx.lineTo(width, y_plus_1_1);
+            ctx.stroke();
+
+            const y_minus_1_1 = height / 2 + (1.1 / phaseScale) * (height / 2);
+            ctx.beginPath();
+            ctx.moveTo(0, y_minus_1_1);
+            ctx.lineTo(width, y_minus_1_1);
+            ctx.stroke();
+
+            ctx.setLineDash([]);
+
+            // Y-axis метки
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '10px Arial';
+            ctx.fillText('+' + phaseScale.toFixed(2) + ' rad', 5, 15);
+            ctx.fillText('0', 5, height / 2 + 4);
+            ctx.fillText('-' + phaseScale.toFixed(2) + ' rad', 5, height - 10);
+
             // Рисуем данные фазы если есть
-            if (data && data.phase_data && data.phase_data.length > 0) {
-                ctx.strokeStyle = '#007bff';
+            if (data && data.phase_xs_ms && data.phase_ys_rad &&
+                data.phase_xs_ms.length > 0 && data.phase_ys_rad.length > 0) {
+
+                ctx.strokeStyle = '#0066FF';
                 ctx.lineWidth = 2;
                 ctx.beginPath();
 
-                const phaseData = data.phase_data;
-                const stepX = width / phaseData.length;
+                const xsMs = data.phase_xs_ms;
+                const ysRad = data.phase_ys_rad;
+                const xMin = xsMs[0];
+                const xMax = xsMs[xsMs.length - 1];
+                const xRange = xMax - xMin || 1;
 
-                for (let i = 0; i < phaseData.length; i++) {
-                    const x = i * stepX;
-                    const y = height / 2 + (phaseData[i] * height / 4);
+                for (let i = 0; i < xsMs.length; i++) {
+                    const x = ((xsMs[i] - xMin) / xRange) * width;
+                    const y = height / 2 - (ysRad[i] / phaseScale) * (height / 2);
 
                     if (i === 0) {
                         ctx.moveTo(x, y);
@@ -1241,13 +1301,179 @@ HTML_TEMPLATE = '''
                     }
                 }
                 ctx.stroke();
+
+                // Рисуем маркеры битов если есть
+                if (data.markers_ms && data.markers_ms.length > 0) {
+                    ctx.strokeStyle = '#00AA00';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 2]);
+
+                    for (const markerMs of data.markers_ms) {
+                        if (markerMs >= xMin && markerMs <= xMax) {
+                            const x = ((markerMs - xMin) / xRange) * width;
+                            ctx.beginPath();
+                            ctx.moveTo(x, 0);
+                            ctx.lineTo(x, height);
+                            ctx.stroke();
+                        }
+                    }
+                    ctx.setLineDash([]);
+                }
+
+                // Подсветка преамбулы если есть
+                if (data.preamble_ms && data.preamble_ms.length === 2) {
+                    const [t0, t1] = data.preamble_ms;
+                    if (t0 >= xMin && t1 <= xMax) {
+                        const x0 = ((t0 - xMin) / xRange) * width;
+                        const x1 = ((t1 - xMin) / xRange) * width;
+
+                        ctx.fillStyle = 'rgba(255, 255, 0, 0.1)';
+                        ctx.fillRect(x0, 0, x1 - x0, height);
+                    }
+                }
+
             } else {
                 // Заглушка
                 ctx.fillStyle = '#6c757d';
                 ctx.font = '16px Arial';
                 ctx.textAlign = 'center';
                 ctx.fillText('No phase data available', width / 2, height / 2);
-                ctx.fillText('Start acquisition to see live data', width / 2, height / 2 + 25);
+                ctx.fillText('Waiting for pulse detection...', width / 2, height / 2 + 25);
+                ctx.textAlign = 'left';
+            }
+        }
+
+        function drawInburstFRView(data) {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // Сетка
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+
+            // Горизонтальные линии (10 делений)
+            for (let i = 0; i <= 10; i++) {
+                const y = (height / 10) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Вертикальные линии (8 делений для времени)
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '10px Arial';
+            for (let i = 0; i <= 8; i++) {
+                const x = (width / 8) * i;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+
+                // Временные метки
+                if (data && data.fr_xs_ms && data.fr_xs_ms.length > 0) {
+                    const timeRange = data.fr_xs_ms[data.fr_xs_ms.length - 1] - data.fr_xs_ms[0];
+                    const timeMs = (data.fr_xs_ms[0] + i * timeRange / 8).toFixed(1);
+                    ctx.fillText(timeMs + ' ms', x - 15, height - 5);
+                }
+            }
+
+            // Центральная линия
+            ctx.strokeStyle = '#adb5bd';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, height / 2);
+            ctx.lineTo(width, height / 2);
+            ctx.stroke();
+
+            // Y-axis метки для частоты
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '10px Arial';
+
+            // Рисуем данные частоты если есть
+            if (data && data.fr_xs_ms && data.fr_ys_hz &&
+                data.fr_xs_ms.length > 0 && data.fr_ys_hz.length > 0) {
+
+                // Находим диапазон частот
+                const ysHz = data.fr_ys_hz;
+                const minFreq = Math.min(...ysHz);
+                const maxFreq = Math.max(...ysHz);
+                const freqRange = maxFreq - minFreq || 1000;
+                const centerFreq = (minFreq + maxFreq) / 2;
+
+                // Y-axis метки
+                ctx.fillText('+' + (freqRange / 2).toFixed(0) + ' Hz', 5, 15);
+                ctx.fillText(centerFreq.toFixed(0) + ' Hz', 5, height / 2 + 4);
+                ctx.fillText('-' + (freqRange / 2).toFixed(0) + ' Hz', 5, height - 10);
+
+                ctx.strokeStyle = '#FF6600';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+
+                const xsMs = data.fr_xs_ms;
+                const xMin = xsMs[0];
+                const xMax = xsMs[xsMs.length - 1];
+                const xRange = xMax - xMin || 1;
+
+                for (let i = 0; i < xsMs.length; i++) {
+                    const x = ((xsMs[i] - xMin) / xRange) * width;
+                    const y = height / 2 - ((ysHz[i] - centerFreq) / (freqRange / 2)) * (height / 2);
+
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+                ctx.stroke();
+
+                // Рисуем маркеры битов если есть
+                if (data.markers_ms && data.markers_ms.length > 0) {
+                    ctx.strokeStyle = '#00AA00';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 2]);
+
+                    for (const markerMs of data.markers_ms) {
+                        if (markerMs >= xMin && markerMs <= xMax) {
+                            const x = ((markerMs - xMin) / xRange) * width;
+                            ctx.beginPath();
+                            ctx.moveTo(x, 0);
+                            ctx.lineTo(x, height);
+                            ctx.stroke();
+                        }
+                    }
+                    ctx.setLineDash([]);
+                }
+
+                // Подсветка преамбулы если есть
+                if (data.preamble_ms && data.preamble_ms.length === 2) {
+                    const [t0, t1] = data.preamble_ms;
+                    if (t0 >= xMin && t1 <= xMax) {
+                        const x0 = ((t0 - xMin) / xRange) * width;
+                        const x1 = ((t1 - xMin) / xRange) * width;
+
+                        ctx.fillStyle = 'rgba(255, 255, 0, 0.1)';
+                        ctx.fillRect(x0, 0, x1 - x0, height);
+                    }
+                }
+
+                // Показываем битрейт если есть
+                if (data.baud) {
+                    ctx.fillStyle = '#333';
+                    ctx.font = '12px Arial';
+                    ctx.textAlign = 'right';
+                    ctx.fillText('BitRate: ' + data.baud.toFixed(2) + ' bps', width - 10, 20);
+                    ctx.textAlign = 'left';
+                }
+
+            } else {
+                // Заглушка
+                ctx.fillStyle = '#6c757d';
+                ctx.font = '16px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('No frequency data available', width / 2, height / 2);
+                ctx.fillText('Waiting for pulse detection...', width / 2, height / 2 + 25);
+                ctx.textAlign = 'left';
             }
         }
 

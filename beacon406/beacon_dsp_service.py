@@ -113,6 +113,14 @@ class PulseEvent:
     length_ms: float
     peak_dbm: float
     above_thresh_ratio: float
+    # Данные для графиков phase и FR (опционально)
+    phase_xs_ms: Optional[list] = None
+    phase_ys_rad: Optional[list] = None
+    fr_xs_ms: Optional[list] = None
+    fr_ys_hz: Optional[list] = None
+    markers_ms: Optional[list] = None
+    preamble_ms: Optional[list] = None
+    baud: Optional[float] = None
 
 @dataclass
 class PSKEvent:
@@ -417,10 +425,13 @@ class BeaconDSPService:
                 except Exception:
                     ratio, peak = float("nan"), float("nan")
 
-                self._emit("pulse", asdict(PulseEvent(start_abs=int(start_abs),
-                                                      length_ms=float(dur_ms),
-                                                      peak_dbm=peak,
-                                                      above_thresh_ratio=ratio)))
+                # Сохраняем базовое событие pulse для последующего обогащения данными
+                pulse_event_data = {
+                    "start_abs": int(start_abs),
+                    "length_ms": float(dur_ms),
+                    "peak_dbm": peak,
+                    "above_thresh_ratio": ratio
+                }
 
                 # Окно вырезки «как в plot»
                 win_len = int(round(duration_samps * WIN_FRAC))
@@ -552,6 +563,54 @@ class BeaconDSPService:
                     self.last_msg_hex = str(msg_hex)
 
                     # Событие psk
+                    # Даунсэмплинг для веб-визуализации (max 1000 точек)
+                    def downsample_data(xs, ys, max_points=1000):
+                        if xs is None or ys is None or len(xs) <= max_points:
+                            return xs, ys
+                        # Простой равномерный даунсэмплинг
+                        step = len(xs) // max_points
+                        if step <= 1:
+                            return xs, ys
+                        xs_down = xs[::step]
+                        ys_down = ys[::step]
+                        return xs_down.tolist(), ys_down.tolist()
+
+                    # Подготавливаем данные фазы для графика
+                    phase_xs_down, phase_ys_down = downsample_data(xs_ms, phase_rad)
+
+                    # Подготавливаем данные частоты для графика (из FM дискриминатора)
+                    fr_xs_ms = None
+                    fr_ys_hz = None
+                    if fm_out is not None and "xs_ms" in fm_out and "inst_freq_hz" in fm_out:
+                        fr_xs_down, fr_ys_down = downsample_data(
+                            fm_out["xs_ms"],
+                            fm_out["inst_freq_hz"]
+                        )
+                        fr_xs_ms = fr_xs_down
+                        fr_ys_hz = fr_ys_down
+
+                    # Маркеры битов/полубитов из edges
+                    markers_ms = None
+                    if edges is not None and len(edges) > 0:
+                        # Преобразуем индексы фронтов в миллисекунды
+                        markers_ms = [float(edge / FSd * 1e3) for edge in edges[:100]]  # Ограничиваем количество
+
+                    # Обогащаем pulse событие данными для графиков
+                    pulse_event_data["phase_xs_ms"] = phase_xs_down
+                    pulse_event_data["phase_ys_rad"] = phase_ys_down
+                    pulse_event_data["fr_xs_ms"] = fr_xs_ms
+                    pulse_event_data["fr_ys_hz"] = fr_ys_hz
+                    pulse_event_data["markers_ms"] = markers_ms
+                    pulse_event_data["preamble_ms"] = [0, float(carrier_ms)] if carrier_ms == carrier_ms else None
+                    pulse_event_data["baud"] = float(baud) if baud == baud else None
+
+                    # Сохраняем последние данные для REP запросов
+                    self.last_pulse_data = pulse_event_data.copy()
+
+                    # Отправляем обогащенное pulse событие
+                    self._emit("pulse", pulse_event_data)
+
+                    # Отправляем PSK событие
                     self._emit("psk", asdict(PSKEvent(
                         start_abs=int(start_abs),
                         length_ms=float(dur_ms),
@@ -568,6 +627,8 @@ class BeaconDSPService:
 
                 except Exception as e:
                     log.info(f"PSK демодуляция пропущена: {e}")
+                    # Отправляем базовое pulse событие без данных фазы
+                    self._emit("pulse", pulse_event_data)
 
         # Хвост для скользящего окна
         need = max(0, self.win_samps - 1)
@@ -609,6 +670,12 @@ class BeaconDSPService:
                         RMS_WIN_MS = float(msg["rms_win_ms"]); self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
                         changed["rms_win_ms"] = RMS_WIN_MS
                     self.rep.send_json({"ok": True, "changed": changed})
+                elif cmd == "get_last_pulse":
+                    # Возвращаем последние данные pulse с фазой и частотой
+                    if hasattr(self, 'last_pulse_data'):
+                        self.rep.send_json({"ok": True, "pulse": self.last_pulse_data})
+                    else:
+                        self.rep.send_json({"ok": False, "error": "No pulse data available"})
                 elif cmd == "save_sigmf":
                     # Сохранение последнего сегмента в SigMF — заглушка (впиши свою функцию сохранения)
                     # Здесь можно дернуть твой writer из lib.sigio, если он есть
