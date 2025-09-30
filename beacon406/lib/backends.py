@@ -176,7 +176,7 @@ class SoapyBackend(SDRBackend):
         self.sample_rate_hw = fs_hw
         # NEW: реальный Fs после внутренней децимации (то, что вернёт read())
         self.actual_sample_rate_sps = float(self.sample_rate_hw / self.decim)
-        
+
         if abs(fs_hw - fs_req) > 1e-3:
             log.info("%s: analysis Fs=%.2f MS/s, HW Fs=%.2f MS/s, decim=%d", drv_key, fs_req/1e6, fs_hw/1e6, self.decim)
 
@@ -214,7 +214,7 @@ class SoapyBackend(SDRBackend):
                 self.stream = self.dev.setupStream(self._SOAPY_SDR_RX, self._SOAPY_SDR_CF32)
         else:
             self.stream = self.dev.setupStream(self._SOAPY_SDR_RX, self._SOAPY_SDR_CF32)
-          
+
         self.dev.activateStream(self.stream)
 
         # Настройка каскадов для HackRF / Airspy / RTL (как было)
@@ -231,7 +231,7 @@ class SoapyBackend(SDRBackend):
                     self.dev.setBandwidth(self._SOAPY_SDR_RX, 0, self.sample_rate_hw)
                 except Exception:
                     pass  # не все версии Soapy поддерживают setBandwidth для HackRF
-            
+
             if "airspy" in drv_key:  # Airspy gain control
                 # LNA gain
                 self.dev.setGain(self._SOAPY_SDR_RX, 0, "LNA", 12)       # 0…21 дБ, шаг 3 дБ
@@ -246,7 +246,7 @@ class SoapyBackend(SDRBackend):
                 # 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4,
                 # 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6]
                 self.dev.setGain(self._SOAPY_SDR_RX, 0, "TUNER", 28.0)   # пример: 28 дБ
-            
+
             if "sdrplay" in drv_key:  # SDRplay gain control
                 # LNAstate — дискретные состояния LNA (в зависимости от диапазона обычно 0…9).
                 # Каждое значение соответствует фиксированному набору каскадов LNA (~2–10 дБ на шаг).
@@ -262,8 +262,8 @@ class SoapyBackend(SDRBackend):
                 # "false" = AGC выключен, все усиления только вручную (рекомендуется для тестов).
                 self.dev.writeSetting("AGC", "false")
                 # Bandwidth - фиксированные значения: обычно 200 kHz, 300 kHz, 600 kHz, 1.536 MHz, 5 MHz, 6 MHz, 7 MHz, 8 MHz
-                self.dev.setBandwidth(self._SOAPY_SDR_RX, 0, 200_000) 
-    
+                self.dev.setBandwidth(self._SOAPY_SDR_RX, 0, 200_000)
+
         except Exception:
             pass
 
@@ -426,7 +426,7 @@ class FilePlaybackBackend(SDRBackend):
         # Формируем удобочитаемую информацию о файле
         file_path = getattr(self, "_path", None)
         if file_path:
-            
+
             filename = os.path.basename(file_path)
             device_info = f"File: {filename}"
         else:
@@ -478,6 +478,53 @@ class FilePlaybackBackend(SDRBackend):
         self._pos = 0
         self._eof = False
 
+    def close(self) -> None:
+        # Ничего не делаем - нет ресурсов для закрытия
+        pass
+
+
+class FileWaitBackend(SDRBackend):
+    """Пустой файловый бэкенд для режима file_wait - не читает данные, ожидает выбора файла в UI"""
+
+    def __init__(self, **kw):
+        # FIXED: для file бэкенда принудительно отключаем if_offset_hz
+        _ = kw.pop("if_offset_hz", 0.0)  # удаляем из kwargs, но игнорируем значение
+        self._if_offset_hz = 0.0  # принудительно устанавливаем в 0.0
+
+        super().__init__(**kw)
+        # NEW: для файла реальный Fs = заявленному sample_rate_sps
+        self.actual_sample_rate_sps = float(self.sample_rate_sps)
+
+        # калибровка
+        self.calib_offset_db = SDR_CALIB_OFFSETS_DB.get("file", 0.0)
+
+    def get_status(self) -> Dict[str, Any]:
+        s = super().get_status()
+        s.update({
+            "driver": "file",
+            "device_info": "Ожидание выбора файла",
+            "file_path": None,
+            "if_offset_hz": float(getattr(self, "_if_offset_hz", 0.0)),
+            "eof": False,
+        })
+        return s
+
+    def get_calib_offset_db(self) -> float:
+        return SDR_CALIB_OFFSETS_DB.get("file", 0.0)
+
+    def read(self, nsamps: int) -> np.ndarray:
+        # Всегда возвращаем пустой массив - ожидаем выбора файла
+        return np.empty(0, dtype=np.complex64)
+
+    def stop(self) -> None:
+        # Ничего не делаем - нет файла для остановки
+        pass
+
+    def close(self) -> None:
+        # Ничего не делаем - нет ресурсов для закрытия
+        pass
+
+
 # --- NEW: safe_make_backend -----------------------------------------------
 def safe_make_backend(
     name: str,
@@ -487,7 +534,7 @@ def safe_make_backend(
     **kwargs,
 ):
     """
-    Безопасный конструктор backend’ов.
+    Безопасный конструктор backend'ов.
     - on_fail="raise": поведение как у make_backend (по умолчанию).
     - on_fail="file_wait": при отсутствии SDR вернёт file-backend с пустым путём (ожидание выбора файла в UI).
     - on_fail="none": при ошибке вернёт None.
@@ -519,23 +566,9 @@ def safe_make_backend(
             return None
 
         if on_fail == "file_wait":
-            fb_args = {"path": ""}
-            if fallback_args:
-                fb_args.update(fallback_args)
-
-            fb_kwargs = {}
-            if "sample_rate" in kwargs:
-                fb_kwargs["sample_rate"] = kwargs["sample_rate"]
-            if "corr_ppm" in kwargs:
-                fb_kwargs["corr_ppm"] = kwargs["corr_ppm"]
-            if "if_offset_hz" in kwargs:
-                fb_kwargs["if_offset_hz"] = kwargs["if_offset_hz"]
-
-            try:
-                return make_backend("file", device_args=fb_args, **fb_kwargs)
-            except Exception:
-                # Путь пустой или file-backend не готов — тихо уходим в режим ожидания
-                return None
+            # В режиме file_wait не пытаемся создавать backend с пустым путём,
+            # а сразу возвращаем None для режима ожидания файла
+            return None
 
         # На всякий случай (неизвестный on_fail) — ведём себя как raise
         raise
@@ -669,13 +702,18 @@ def make_backend(name: str,
                         or device_args.get("file")
                         or device_args.get("uri"))
         if not path:
-            
+
             path = os.getenv("IQ_FILE_PATH")
 
         if not path:
-            raise ValueError(
-                "Для backend='file' нужен путь к .cf32/.sigmf-meta "
-                "(extras['path'] | BACKEND_ARGS | env IQ_FILE_PATH)"
+            # Разрешаем пустой путь для режима file_wait - создаем "пустой" файловый бэкенд
+            return FileWaitBackend(
+                sample_rate=sample_rate,
+                center_freq=center_freq,
+                gain_db=gain_db,
+                agc=agc,
+                corr_ppm=corr_ppm,
+                if_offset_hz=0.0  # принудительно отключено для file режима
             )
 
         # NEW: Check for SigMF files and extract metadata automatically
@@ -708,7 +746,7 @@ def make_backend(name: str,
             corr_ppm=corr_ppm,
             if_offset_hz=if_offset_hz,   # всегда 0.0 для file
         )
-        
+
     if name in ("tek_rsa", "rsa306", "rsa"):
         return TekRSABackend(
             sample_rate=sample_rate,
@@ -809,7 +847,7 @@ def autodetect_soapy_driver() -> str:
     # dll_path можно переопределить через переменную окружения RSA_API_DLL
     dll_path = os.getenv("RSA_API_DLL", r"C:/Tektronix/RSA_API/lib/x64/RSA_API.dll")
     try:
-        
+
         if os.path.exists(dll_path):
             L = ct.CDLL(dll_path)
             # DEVICE_SearchIntW: int *numDevs, int **ids, wchar_t **sn, wchar_t **type
@@ -908,7 +946,7 @@ class RSA_API_Wrapper:
     def iqstream_stop(self):  self.lib.IQSTREAM_Stop()
 
     def iqstream_get_block(self, buf_pairs: int):
-        
+
         n = ct.c_int(0)
         buf = (ct.c_float * (2 * buf_pairs))()
         st = self.lib.IQSTREAM_GetIQData(ct.cast(buf, ct.c_void_p), ct.byref(n), None)
@@ -955,7 +993,7 @@ class TekRSABackend(SDRBackend):
         bw = ct.c_double(0.0)
         fs_val = ct.c_double(0.0)
         self._rsa.lib.IQSTREAM_GetAcqParameters(ct.byref(bw), ct.byref(fs_val))
-        """ 
+        """
         print("=== RSA306 CONFIG ===")
         print(f" Center Freq set      : {center_freq/1e6:.6f} MHz (actual {freq.value/1e6:.6f} MHz)")
         print(f" Ref Level            : {ref.value:.1f} dBm")
@@ -992,7 +1030,7 @@ class TekRSABackend(SDRBackend):
         self._thread.start()
 
     def read(self, nsamps: int):
-        
+
         if nsamps <= 0:
             return np.empty(0, dtype=np.complex64)
         with self._lock:
@@ -1035,6 +1073,9 @@ class TekRSABackend(SDRBackend):
         except Exception:
             pass
 
+    def close(self) -> None:
+        # Ничего не делаем - нет ресурсов для закрытия
+        pass
+
     def get_calib_offset_db(self) -> float:
         return SDR_CALIB_OFFSETS_DB.get("rsa306", 0.0)
-

@@ -17,28 +17,33 @@ TesterSDR — это приложение для программно-опред
 ### Основные команды разработки
 
 ```bash
-# Запуск веб-интерфейса (рекомендуется для большинства задач)
+# Запуск веб-интерфейса (монолитная версия)
 python beacon406/beacon_tester_dsp2web.py  # Открывается на http://127.0.0.1:8738/
 
-# Или используйте Windows batch-файл
+# Микросервисная архитектура (DSP сервис + веб клиент)
+app_dsp2web.bat  # Запускает DSP сервис на ZeroMQ 8781/8782 и веб на 8738
+# Или вручную:
+python beacon406/beacon_dsp_service.py --pub tcp://127.0.0.1:8781 --rep tcp://127.0.0.1:8782
+python beacon406/beacon_tester_dsp2web.py --pub tcp://127.0.0.1:8781 --rep tcp://127.0.0.1:8782
+
+# UI с визуализацией через DSP сервис (новый plot клиент)
+python beacon406/beacon_dsp2plot.py  # Matplotlib UI подключается к DSP сервису
+
+# Быстрый запуск монолитного веб-интерфейса
 app.bat  # Запускает веб-интерфейс и автоматически открывает браузер
 
 # Остановка Flask серверов и освобождение портов
 stop_flask.bat  # Завершает все Python процессы и освобождает порты 8737-8740
 
-# Запуск основного приложения визуализации
-cd beacon406
-python beacon406-plot.py
+# Классические приложения визуализации (standalone)
+python beacon406/beacon406-plot.py  # Основное приложение с RMS и PSK
+python beacon406/beacon406_PSK_FM-plot.py  # С поддержкой FM демодуляции
 
-# Запуск GUI-приложения
-python beacon_tester_gui.py
+# GUI-приложение Qt
+python beacon406/beacon_tester_gui.py
 
-# Запуск GUI передатчика PSK406
+# GUI передатчика PSK406
 python beacon406/apps/gen/ui_psk406_tx.py
-
-# DSP-сервис с веб-интерфейсом (микросервисная архитектура)
-python beacon406/beacon_dsp_service.py --pub tcp://127.0.0.1:8781 --rep tcp://127.0.0.1:8782
-python beacon406/beacon_tester_web_dsp_only.py  # Клиент для DSP-сервиса
 ```
 
 ### Запуск приложений с визуализацией
@@ -74,13 +79,12 @@ python beacon406/apps/epirb_hex_decoder.py
 ### Основные компоненты
 
 **beacon406/** - Основной Python модуль:
-- `beacon406-plot.py` - Основное приложение визуализации с real-time обработкой, RMS-анализом и PSK-демодуляцией
+- `beacon406-plot.py` - Классическое приложение визуализации с real-time обработкой, RMS-анализом и PSK-демодуляцией
 - `beacon406_PSK_FM-plot.py` - Расширенная версия с поддержкой FM демодуляции
 - `beacon_tester_gui.py` - PySide6/Qt GUI со спектром, водопадом, PSK-демодуляцией
-- `beacon_tester_web.py` - Веб-интерфейс Flask (порт 8738) с загрузкой CF32 файлов (удален)
-- `beacon_tester_dsp2web.py` - Монолитный веб-интерфейс с встроенной DSP обработкой (порт 8738)
-- `beacon_tester_web_dsp_only.py` - Веб-клиент для отдельного DSP-сервиса (порт 8738)
-- `beacon_dsp_service.py` - Headless DSP-движок с ZeroMQ IPC (порты 8781-8782)
+- `beacon_tester_dsp2web.py` - Веб-интерфейс Flask с встроенной DSP обработкой (порт 8738), поддержка ZeroMQ клиента
+- `beacon_dsp_service.py` - Headless DSP-движок с ZeroMQ IPC (PUB: 8781, REP: 8782), поддержка AUTO/FILE режимов
+- `beacon_dsp2plot.py` - UI клиент для DSP-сервиса с Matplotlib визуализацией и backend переключением
 
 **beacon406/lib/** - Библиотеки обработки:
 - `backends.py` - Унифицированный слой SDR абстракции (RTL-SDR, HackRF, Airspy, SDRPlay, RSA306)
@@ -129,22 +133,38 @@ python beacon406/apps/epirb_hex_decoder.py
 
 #### beacon_dsp_service.py
 - Headless DSP-движок без GUI и Flask
+- Автоматический выбор SDR бэкенда (AUTO режим)
+- Поддержка файлового режима (FILE) с автоотключением BB shift
 - Кольцевой буфер IQ с NCO (baseband shift)
 - Скользящее RMS (1 мс окно) с детекцией импульсов
-- Детектор с OFF-HANG (защита от дробления)
+- Детектор с OFF-HANG (защита от дробления, 60 мс выдержка)
 - PSK демодуляция и метрики через lib.metrics/lib.demod
 - ZeroMQ PUB для событий (status/pulse/psk) на порту 8781
-- ZeroMQ REP для команд (start/stop/set_params) на порту 8782
+- ZeroMQ REP для команд на порту 8782:
+  - `start_acquire/stop_acquire` - управление потоком данных
+  - `get_sdr_config/set_sdr_config` - конфигурация SDR
+  - `set_params` - настройка порогов детекции
+  - `save_sigmf` - сохранение в SigMF формате
+  - `get_status` - текущий статус
 - Опциональная запись JSONL-сессии
 
 #### Клиент-серверное взаимодействие
-- beacon_tester_web_dsp_only.py подключается к DSP-сервису через ZeroMQ
-- Подписка на PUB канал для получения событий в реальном времени
+
+**beacon_dsp2plot.py** (UI клиент):
+- Подключение к DSP-сервису через ZeroMQ (PUB: 8781, REP: 8782)
+- Кнопки переключения бэкендов: Auto/RTL/HackRF/Airspy/SDRPlay/RSA/File
+- Стабильная обработка REQ/REP с автопересозданием сокета при EFSM
+- Визуализация: фаза, RMS, спектр, декодированные сообщения
+
+**beacon_tester_dsp2web.py** (веб клиент):
+- Двойной режим: монолитный (встроенный DSP) или клиент ZeroMQ
+- Подписка на PUB канал для событий в реальном времени
 - REP канал для управления DSP (старт/стоп, параметры)
-- Веб-интерфейс обновляется асинхронно от DSP событий
+- REST API для веб-интерфейса на порту 8738
 
 ### Конфигурация бэкенда
 
+#### Через config.py
 Редактируйте `beacon406/lib/config.py`:
 ```python
 # Автоопределение SDR
@@ -157,6 +177,18 @@ BACKEND_NAME = "soapy_hackrf"  # или "soapy_rtl", "soapy_airspy", "soapy_sdrp
 # Воспроизведение файла
 BACKEND_NAME = "file"
 BACKEND_ARGS = r"C:/work/TesterSDR/captures/your_recording.cf32"
+```
+
+#### Через ZeroMQ команды (DSP сервис)
+```json
+// Установка backend через set_sdr_config
+{
+  "cmd": "set_sdr_config",
+  "backend": "auto|soapy_rtl|soapy_hackrf|file",
+  "file_path": "path/to/file.cf32",  // для file режима
+  "center_freq_hz": 406037000,
+  "sample_rate_sps": 1000000
+}
 ```
 
 ## Конвейер обработки сигналов
@@ -187,6 +219,9 @@ BACKEND_ARGS = r"C:/work/TesterSDR/captures/your_recording.cf32"
 - `POST /api/measure` - Измерение параметров
 - `POST /api/load` - Загрузка конфигурации
 - `POST /api/save` - Сохранение конфигурации
+- `GET /api/sdr/get_config` - Получение SDR конфигурации
+- `POST /api/sdr/set_config` - Установка SDR параметров
+- `GET /api/health` - Проверка статуса ZeroMQ соединения
 
 ### JavaScript фронтенд
 - Canvas график фазы с прореживанием до ~1000 точек

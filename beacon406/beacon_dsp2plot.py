@@ -87,16 +87,36 @@ class DspServiceClient:
 
         self.req = self.ctx.socket(zmq.REQ)
         # Set reasonable timeouts for stable operation
+        # Increased timeout for file operations which may take longer
         try:
-            self.req.setsockopt(zmq.RCVTIMEO, 2000)  # 2 second receive timeout
-            self.req.setsockopt(zmq.SNDTIMEO, 2000)  # 2 second send timeout
-            self.req.setsockopt(zmq.LINGER, 0)       # Don't wait on close
+            self.req.setsockopt(zmq.RCVTIMEO, 10000)  # 10 second receive timeout for file operations
+            self.req.setsockopt(zmq.SNDTIMEO, 5000)   # 5 second send timeout
+            self.req.setsockopt(zmq.LINGER, 0)        # Don't wait on close
         except Exception:
             pass
 
         self.req.connect(self.rep_addr)
         self._req_socket_broken = False
 
+    def quick_status_check(self):
+        """Quick status check with short timeout to test if service is responsive."""
+        temp_req = self.ctx.socket(zmq.REQ)
+        try:
+            temp_req.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout
+            temp_req.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second timeout
+            temp_req.setsockopt(zmq.LINGER, 0)
+            temp_req.connect(self.rep_addr)
+
+            import json
+            req = {"cmd": "get_status"}
+            temp_req.send_string(json.dumps(req))
+            resp_str = temp_req.recv_string()
+            rep = json.loads(resp_str)
+            return rep if isinstance(rep, dict) else None
+        except Exception:
+            return None
+        finally:
+            temp_req.close(0)
 
     # ---- stream ----
     def subscribe_events(self, callback: Callable[[Dict[str, Any]], None]):
@@ -166,7 +186,9 @@ class DspServiceClient:
     def stop_acquire(self) -> Dict[str, Any]: return self._cmd("stop_acquire")
     def get_status(self) -> Dict[str, Any]: return self._cmd("get_status")
     def get_sdr_config(self) -> Dict[str, Any]: return self._cmd("get_sdr_config")
-    def set_sdr_config(self, **cfg) -> Dict[str, Any]: return self._cmd("set_sdr_config", **cfg)
+    def set_sdr_config(self, **cfg) -> Dict[str, Any]:
+        # Send config wrapped in 'config' field for DSP service compatibility
+        return self._cmd("set_sdr_config", config=cfg)
     def set_params(self, **params) -> Dict[str, Any]: return self._cmd("set_params", **params)
     def save_sigmf(self) -> Dict[str, Any]: return self._cmd("save_sigmf")
     # file ops (если реализованы в сервисе)
@@ -211,8 +233,10 @@ class Dsp2PlotUI:
         # первичный статус
         try:
             st = self.client.get_status()
-            if isinstance(st, dict): self.last_status = st
-            self.sample_rate = float(st.get("fs", self.sample_rate))
+            if isinstance(st, dict):
+                st_payload = st.get("status", st)
+                self.last_status = st_payload
+                self.sample_rate = float(st_payload.get("fs", self.sample_rate))
         except Exception:
             pass
 
@@ -424,60 +448,53 @@ class Dsp2PlotUI:
 
     # ---------- UI callbacks ----------
     def _on_backend_select(self, backend_name: str):
-        cfg = self.client.get_sdr_config() or {}
-        cfg["backend_name"] = backend_name
-        if backend_name == "file":
-            cfg["bb_shift_enable"] = False
-            cfg["bb_shift_hz"] = 0
-        # Apply config with safe sequencing and small delays
-        print("[backend] stop_acquire", self.client.stop_acquire())
-        time.sleep(0.1)  # Small delay for service to process stop
-        rep = self.client.set_sdr_config(**cfg)
-        print("[set_sdr_config]", rep)
-        time.sleep(0.1)  # Small delay for service to process config change
-        print("[backend] start_acquire", self.client.start_acquire())
+        # For file backend, ask for file first
         if backend_name == "file":
             try:
                 root = tk.Tk(); root.withdraw()
                 path = filedialog.askopenfilename(
                     title="Выберите CF32 или SigMF",
-                    filetypes=[("CF32", "*.cf32"), ("SigMF", "*.sigmf-meta"), ("All", "*.*")]
+                    filetypes=[("CF32", "*.cf32"), ("F32", "*.f32"), ("SigMF", "*.sigmf-meta"), ("All", "*.*")]
                 )
                 root.destroy()
-                if path:
-                    print("[file] stop_acquire", self.client.stop_acquire())
-                    cfg2 = self.client.get_sdr_config() or {}
-                    cfg2["backend_name"] = "file"
-                    cfg2["bb_shift_enable"] = False
-                    cfg2["bb_shift_hz"] = 0
-                    print("[file] set_sdr_config", self.client.set_sdr_config(**cfg2))
-                    print("[file_load]", self.client.file_load(path=path, start_s=0.0, loop=False))
-                    print("[file_play]", self.client.file_play(rate=1.0))
-                    print("[file] start_acquire", self.client.start_acquire())
+                if not path:
+                    return  # User cancelled
             except Exception as e:
                 print("file open err:", e)
+                return
+        else:
+            path = None
+
+        # Stop current acquisition
+        print("[backend] stop_acquire", self.client.stop_acquire())
+        time.sleep(0.2)  # Small delay for service to process stop
+
+        # Get current config and update it
+        cfg_resp = self.client.get_sdr_config()
+        if cfg_resp and "config" in cfg_resp:
+            cfg = cfg_resp["config"]  # DSP service returns config in nested structure
+        else:
+            cfg = {}
+
+        # Update backend and file parameters
+        cfg["backend_name"] = backend_name
+        if backend_name == "file" and path:
+            cfg["backend_args"] = {"path": path}  # Pass file path as dict for DSP service
+            cfg["bb_shift_enable"] = False
+            cfg["bb_shift_hz"] = 0
+
+        # Apply config - send directly without 'config' wrapper
+        print(f"[set_sdr_config] backend={backend_name}, file={path}")
+        rep = self.client.set_sdr_config(**cfg)
+        print("[set_sdr_config result]", rep)
+        time.sleep(0.2)  # Small delay for service to process config change
+
+        # Restart acquisition
+        print("[backend] start_acquire", self.client.start_acquire())
 
     def _on_file_select(self, _event):
-        try:
-            root = tk.Tk(); root.withdraw()
-            path = filedialog.askopenfilename(
-                title="Выберите CF32 или SigMF",
-                filetypes=[("CF32", "*.cf32"), ("SigMF", "*.sigmf-meta"), ("All", "*.*")]
-            )
-            root.destroy()
-            if path:
-                # ensure file backend and paused
-                print("[file] stop_acquire", self.client.stop_acquire())
-                cfg = self.client.get_sdr_config() or {}
-                cfg["backend_name"] = "file"
-                cfg["bb_shift_enable"] = False
-                cfg["bb_shift_hz"] = 0
-                print("[file] set_sdr_config", self.client.set_sdr_config(**cfg))
-                print("[file_load]", self.client.file_load(path=path, start_s=0.0, loop=False))
-                print("[file_play]", self.client.file_play(rate=1.0))
-                print("[file] start_acquire", self.client.start_acquire())
-        except Exception as e:
-            print("file open err:", e)
+        # This is the same as selecting File backend
+        self._on_backend_select("file")
 
     def _on_exit(self, _event):
         self.clean_exit(0)
@@ -492,7 +509,8 @@ class Dsp2PlotUI:
         ax.set_title("SDR Status (snapshot)")
         lines = []
         if isinstance(st, dict):
-            for k, v in st.items():
+            st_payload = st.get("status", st)
+            for k, v in st_payload.items():
                 lines.append(f"{k}: {v}")
         else:
             lines.append("нет данных")
@@ -575,7 +593,8 @@ def _candidate_service_paths() -> list:
 def _spawn_service_if_needed(client):
     """Try get_status(); if it fails, spawn the service without args and wait until ready."""
     try:
-        rep = client.get_status()
+        # Use quick check to avoid hanging on startup
+        rep = client.quick_status_check()
         if isinstance(rep, dict) and rep.get("ok", True):
             return None  # already running
     except Exception:
@@ -593,7 +612,7 @@ def _spawn_service_if_needed(client):
             t0 = time.time()
             while time.time() - t0 < 6.0:
                 try:
-                    rep = client.get_status()
+                    rep = client.quick_status_check()
                     if isinstance(rep, dict):
                         print("[auto] dsp_service is ready")
                         return proc
