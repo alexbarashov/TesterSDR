@@ -18,6 +18,12 @@ log = get_logger(__name__)
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import numpy as np
+
+# Import SigMF support functions
+try:
+    from .sigio import open_iq as sigio_open_iq
+except ImportError:
+    sigio_open_iq = None
 import ctypes as ct, threading, time
 from collections import deque
 import os, platform
@@ -389,7 +395,9 @@ class SoapyBackend(SDRBackend):
 class FilePlaybackBackend(SDRBackend):
     def __init__(self, path: str, **kw):
         # вытащим offset ДО super(), чтобы он не ушёл наверх
-        self._if_offset_hz = float(kw.pop("if_offset_hz", 0.0) or 0.0)
+        # FIXED: для file бэкенда принудительно отключаем if_offset_hz
+        _ = kw.pop("if_offset_hz", 0.0)  # удаляем из kwargs, но игнорируем значение
+        self._if_offset_hz = 0.0  # принудительно устанавливаем в 0.0
 
         super().__init__(**kw)
         # NEW: для файла реальный Fs = заявленному sample_rate_sps
@@ -533,6 +541,73 @@ def safe_make_backend(
         raise
 # --- END NEW --------------------------------------------------------------
 
+
+
+def extract_sigmf_metadata(file_path: str):
+    """
+    Извлекает метаданные из .sigmf-meta файла для автоматической настройки.
+
+    Args:
+        file_path: Путь к .sigmf-meta файлу или связанному .sigmf-data файлу
+
+    Returns:
+        tuple: (sample_rate, center_freq, data_file_path) или (None, None, None) если не SigMF
+    """
+    if not file_path:
+        return None, None, None
+
+    # Normalize path and check for SigMF
+    path_lower = file_path.lower()
+
+    if path_lower.endswith('.sigmf-meta'):
+        meta_path = file_path
+        data_path = file_path.replace('.sigmf-meta', '.sigmf-data')
+    elif path_lower.endswith('.sigmf-data'):
+        meta_path = file_path.replace('.sigmf-data', '.sigmf-meta')
+        data_path = file_path
+    else:
+        # Not a SigMF file
+        return None, None, None
+
+    # Check if both files exist
+    if not (os.path.exists(meta_path) and os.path.exists(data_path)):
+        return None, None, None
+
+    try:
+        if sigio_open_iq is not None:
+            # Use sigio to parse SigMF
+            reader = sigio_open_iq(meta_path, strict=False)
+            status = reader.get_status()
+            reader.stop()
+
+            sample_rate = status.get('input_sample_rate_sps')
+            center_freq = status.get('center_freq_hz')
+
+            if sample_rate and center_freq:
+                return float(sample_rate), float(center_freq), data_path
+        else:
+            # Fallback to manual JSON parsing
+            import json
+
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                sigmf_data = json.load(f)
+
+            global_info = sigmf_data.get('global', {})
+            captures = sigmf_data.get('captures', [])
+
+            sample_rate = global_info.get('sample_rate')
+            center_freq = captures[0].get('frequency', 0.0) if captures else 0.0
+
+            if sample_rate and center_freq:
+                return float(sample_rate), float(center_freq), data_path
+
+    except Exception as e:
+        print(f"Warning: Failed to parse SigMF metadata: {e}")
+
+    return None, None, None
+
+
+
 def make_backend(name: str,
                  *,
                  sample_rate: float,
@@ -599,24 +674,39 @@ def make_backend(name: str,
 
         if not path:
             raise ValueError(
-                "Для backend='file' нужен путь к .cf32 "
+                "Для backend='file' нужен путь к .cf32/.sigmf-meta "
                 "(extras['path'] | BACKEND_ARGS | env IQ_FILE_PATH)"
             )
 
-        if_offset_hz = 0.0
-        if isinstance(device_args, dict):
-            if_offset_hz = float(device_args.get("if_offset_hz", device_args.get("IF_OFFSET_HZ", 0.0)))
-        if isinstance(extras, dict):
-            if_offset_hz = float(extras.get("if_offset_hz", if_offset_hz))
+        # NEW: Check for SigMF files and extract metadata automatically
+        sigmf_sr, sigmf_cf, sigmf_data_path = extract_sigmf_metadata(path)
+
+        if sigmf_sr is not None and sigmf_cf is not None:
+            # Use SigMF metadata values, override passed parameters
+            actual_sample_rate = sigmf_sr
+            actual_center_freq = sigmf_cf
+            actual_path = sigmf_data_path
+            print(f"SigMF detected: SR={actual_sample_rate}, CF={actual_center_freq}")
+        else:
+            # Regular .cf32 file - use passed parameters
+            actual_sample_rate = sample_rate
+            actual_center_freq = center_freq
+            actual_path = path
+
+        # FIXED: для file бэкенда принудительно игнорируем if_offset_hz (всегда 0.0)
+        if_offset_hz = 0.0  # принудительно отключено для file режима
+        # Игнорируем любые переданные значения if_offset_hz для file бэкенда
+        _ = device_args.get("if_offset_hz") if isinstance(device_args, dict) else None
+        _ = extras.get("if_offset_hz") if isinstance(extras, dict) else None
 
         return FilePlaybackBackend(
-            path=path,
-            sample_rate=sample_rate,
-            center_freq=center_freq,
+            path=actual_path,
+            sample_rate=actual_sample_rate,
+            center_freq=actual_center_freq,
             gain_db=gain_db,
             agc=agc,
             corr_ppm=corr_ppm,
-            if_offset_hz=if_offset_hz,   # ← NEW
+            if_offset_hz=if_offset_hz,   # всегда 0.0 для file
         )
         
     if name in ("tek_rsa", "rsa306", "rsa"):

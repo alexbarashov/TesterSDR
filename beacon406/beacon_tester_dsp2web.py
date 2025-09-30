@@ -1204,6 +1204,8 @@ HTML_TEMPLATE = '''
                     document.getElementById('sample_rate_sps').value = config.sample_rate_sps || '';
                     document.getElementById('bb_shift_hz').value = config.bb_shift_hz || '';
                     document.getElementById('bb_shift_enable').checked = config.bb_shift_enable || false;
+                    // Обновляем состояние BB shift UI после загрузки конфигурации
+                    updateBBShiftUI();
                     document.getElementById('freq_corr_hz').value = config.freq_corr_hz || '';
                     document.getElementById('agc').checked = config.agc || false;
                     document.getElementById('gain_db').value = config.gain_db || '';
@@ -1294,6 +1296,8 @@ HTML_TEMPLATE = '''
                 document.getElementById('sample_rate_sps').value = preset.sample_rate_sps || '';
                 document.getElementById('bb_shift_hz').value = preset.bb_shift_hz || '';
                 document.getElementById('bb_shift_enable').checked = preset.bb_shift_enable || false;
+                // Обновляем состояние BB shift UI после загрузки пресета
+                updateBBShiftUI();
                 document.getElementById('freq_corr_hz').value = preset.freq_corr_hz || '';
                 document.getElementById('agc').checked = preset.agc || false;
                 document.getElementById('gain_db').value = preset.gain_db || '';
@@ -2228,6 +2232,61 @@ HTML_TEMPLATE = '''
         }
 
         // === ИНИЦИАЛИЗАЦИЯ ===
+        // Обновление состояния BB shift элементов управления в зависимости от backend
+        function updateBBShiftUI() {
+            const backendName = document.getElementById('backend_name').value;
+            const isFileBackend = backendName === 'file';
+
+            // Получаем элементы управления BB shift
+            const bbShiftInput = document.getElementById('bb_shift_hz');
+            const bbShiftCheckbox = document.getElementById('bb_shift_enable');
+            const bbShiftLabel = bbShiftInput.parentElement.querySelector('label');
+
+            if (isFileBackend) {
+                // Для file backend - отключаем BB shift управление
+                bbShiftInput.disabled = true;
+                bbShiftCheckbox.disabled = true;
+                bbShiftInput.style.opacity = '0.5';
+                bbShiftCheckbox.style.opacity = '0.5';
+
+                // Принудительно устанавливаем значения в 0
+                bbShiftInput.value = '0';
+                bbShiftCheckbox.checked = false;
+
+                // Добавляем визуальную индикацию
+                bbShiftInput.title = 'BB shift отключен для file режима';
+                bbShiftCheckbox.title = 'BB shift отключен для file режима';
+
+                // Добавляем текстовую метку если её нет
+                let disabledLabel = document.getElementById('bb_shift_disabled_label');
+                if (!disabledLabel) {
+                    disabledLabel = document.createElement('span');
+                    disabledLabel.id = 'bb_shift_disabled_label';
+                    disabledLabel.textContent = ' (отключено в file режиме)';
+                    disabledLabel.style.color = '#666';
+                    disabledLabel.style.fontSize = '11px';
+                    disabledLabel.style.fontStyle = 'italic';
+                    bbShiftLabel.appendChild(disabledLabel);
+                }
+            } else {
+                // Для других backend - включаем BB shift управление
+                bbShiftInput.disabled = false;
+                bbShiftCheckbox.disabled = false;
+                bbShiftInput.style.opacity = '1';
+                bbShiftCheckbox.style.opacity = '1';
+
+                // Убираем title подсказки
+                bbShiftInput.title = '';
+                bbShiftCheckbox.title = '';
+
+                // Удаляем текстовую метку если есть
+                const disabledLabel = document.getElementById('bb_shift_disabled_label');
+                if (disabledLabel) {
+                    disabledLabel.remove();
+                }
+            }
+        }
+
         function initialize() {
             console.log('Initializing DSP2Web Full UI client...');
 
@@ -2236,6 +2295,10 @@ HTML_TEMPLATE = '''
             refreshState();
             loadLastPulse();
             checkHealth();
+
+            // Установка обработчика изменения backend для управления BB shift UI
+            updateBBShiftUI();
+            document.getElementById('backend_name').addEventListener('change', updateBBShiftUI);
 
             // Периодические обновления
             setInterval(checkHealth, 5000);

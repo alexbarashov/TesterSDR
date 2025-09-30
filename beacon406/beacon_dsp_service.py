@@ -45,7 +45,7 @@ except Exception:
     zmq = None  # Разрешаем запуск и без IPC (будет только лог)
 
 # Проектные импорты
-from lib.backends import safe_make_backend
+from lib.backends import safe_make_backend, autodetect_soapy_driver
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.processing_fm import fm_discriminator
@@ -136,6 +136,155 @@ class PSKEvent:
     asymmetry_pct: Optional[float]
     hex: Optional[str]
 
+
+def detect_devices() -> Dict[str, Any]:
+    """
+    Определяет доступные SDR устройства.
+
+    Returns:
+        Dict с информацией о доступных устройствах:
+        {
+            "rtl": bool,
+            "hackrf": bool,
+            "airspy": bool,
+            "sdrplay": bool,
+            "rsa306": bool,
+            "detected_backend": str | None,  # первое найденное устройство
+            "available_backends": List[str]   # список всех доступных
+        }
+    """
+    result = {
+        "rtl": False,
+        "hackrf": False,
+        "airspy": False,
+        "sdrplay": False,
+        "rsa306": False,
+        "detected_backend": None,
+        "available_backends": []
+    }
+
+    try:
+        # Пробуем использовать autodetect_soapy_driver для поиска устройств
+        try:
+            detected = autodetect_soapy_driver()
+            result["detected_backend"] = detected
+        except RuntimeError:
+            # Нет устройств - это нормально для detect_devices
+            detected = None
+            result["detected_backend"] = None
+
+        # Мапинг имен backend на флаги
+        backend_mapping = {
+            "soapy_rtl": "rtl",
+            "soapy_hackrf": "hackrf",
+            "soapy_airspy": "airspy",
+            "soapy_sdrplay": "sdrplay",
+            "rsa": "rsa306",
+            "rsa306": "rsa306"
+        }
+
+        # Устанавливаем флаг для найденного устройства
+        device_key = backend_mapping.get(detected)
+        if device_key:
+            result[device_key] = True
+            result["available_backends"].append(detected)
+
+        # Попробуем дополнительно проверить каждое устройство отдельно
+        try:
+            import SoapySDR
+
+            # Проверяем доступные драйверы через SoapySDR
+            for backend_name, device_key in backend_mapping.items():
+                if not backend_name.startswith("soapy_"):
+                    continue
+
+                driver = backend_name.replace("soapy_", "")
+                try:
+                    devices = SoapySDR.Device.enumerate({"driver": driver})
+                    if devices:
+                        result[device_key] = True
+                        if backend_name not in result["available_backends"]:
+                            result["available_backends"].append(backend_name)
+                except Exception:
+                    pass
+
+        except Exception:
+            # SoapySDR не доступен - используем только результат autodetect
+            pass
+
+        # Проверяем RSA306 отдельно
+        try:
+            import ctypes as ct
+            dll_path = os.getenv("RSA_API_DLL", r"C:/Tektronix/RSA_API/lib/x64/RSA_API.dll")
+            if os.path.exists(dll_path):
+                L = ct.CDLL(dll_path)
+                num = ct.c_int(0)
+                ids = ct.POINTER(ct.c_int)()
+                sns = ct.POINTER(ct.c_wchar_p)()
+                tys = ct.POINTER(ct.c_wchar_p)()
+                L.DEVICE_SearchIntW.argtypes = [ct.POINTER(ct.c_int),
+                                                ct.POINTER(ct.POINTER(ct.c_int)),
+                                                ct.POINTER(ct.POINTER(ct.c_wchar_p)),
+                                                ct.POINTER(ct.POINTER(ct.c_wchar_p))]
+                L.DEVICE_SearchIntW.restype = ct.c_int
+                rc = L.DEVICE_SearchIntW(ct.byref(num), ct.byref(ids), ct.byref(sns), ct.byref(tys))
+                if rc == 0 and num.value > 0:
+                    result["rsa306"] = True
+                    result["available_backends"].append("rsa306")
+                    if not result["detected_backend"]:
+                        result["detected_backend"] = "rsa306"
+        except Exception:
+            pass
+
+    except Exception as e:
+        # В случае ошибки возвращаем пустой результат
+        try:
+            print(f"Warning: device detection failed: {str(e)}")
+        except:
+            print("Warning: device detection failed")
+
+    return result
+
+
+def select_auto_backend(file_path: Optional[str] = None) -> str:
+    """
+    Выбирает backend в режиме AUTO по приоритету.
+
+    Args:
+        file_path: Путь к файлу (если задан)
+
+    Returns:
+        Имя backend для использования
+
+    Raises:
+        RuntimeError: Если ни одно устройство не найдено и файл не задан
+    """
+    devices = detect_devices()
+
+    # Приоритет выбора: RTL -> HackRF -> Airspy -> SDRplay -> RSA306
+    priority_order = ["rtl", "hackrf", "airspy", "sdrplay", "rsa306"]
+    backend_mapping = {
+        "rtl": "soapy_rtl",
+        "hackrf": "soapy_hackrf",
+        "airspy": "soapy_airspy",
+        "sdrplay": "soapy_sdrplay",
+        "rsa306": "rsa306"
+    }
+
+    # Ищем первое доступное устройство по приоритету
+    for device_type in priority_order:
+        if devices[device_type]:
+            return backend_mapping[device_type]
+
+    # Если SDR не найдено, но задан файл - используем file backend
+    if file_path:
+        return "file"
+
+    # Ничего не найдено
+    raise RuntimeError("No SDR found and no file provided")
+
+
+
 class BeaconDSPService:
     def __init__(self,
                  pub_addr: str = DEFAULT_PUB_ADDR,
@@ -153,6 +302,10 @@ class BeaconDSPService:
         self.nco_phase = 0.0
         self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+
+        # Эффективные значения BB shift (могут отличаться от констант для file-режима)
+        self.effective_bb_shift_enable = BB_SHIFT_ENABLE
+        self.effective_bb_shift_hz = BB_SHIFT_HZ
 
         # Кольцевой буфер и история RMS
         self.store_max_samps = int(PULSE_STORE_SEC * self.sample_rate)
@@ -205,9 +358,30 @@ class BeaconDSPService:
 
     # ---------------- Backend ----------------
     def _make_backend(self):
-        name = self.backend_name or os.environ.get("BACKEND_NAME", None) or "soapy_rtl"
+        name = self.backend_name or os.environ.get("BACKEND_NAME", None) or "auto"
         args = self.backend_args
+
+        # Обработка AUTO режима
+        if name.lower() == "auto":
+            try:
+                # Извлекаем file_path из args если есть
+                file_path = None
+                if isinstance(args, dict):
+                    file_path = args.get("path") or args.get("file_path")
+                elif isinstance(args, str):
+                    file_path = args
+
+                # Используем нашу функцию автовыбора
+                name = select_auto_backend(file_path)
+                log.info(f"AUTO mode selected backend: {name}")
+            except RuntimeError as e:
+                log.error(f"AUTO backend selection failed: {e}")
+                # Fallback на file_wait режим
+                name = "file"
+                args = {"path": ""}
+
         try:
+            # Используем safe_make_backend с file_wait fallback
             self.backend = safe_make_backend(
                 name,
                 sample_rate=SAMPLE_RATE_SPS,
@@ -217,16 +391,36 @@ class BeaconDSPService:
                 corr_ppm=int(FREQ_CORR_PPM),
                 device_args=args,
                 if_offset_hz=IF_OFFSET_HZ,
+                on_fail="file_wait"  # Мягкий fallback на ожидание файла
             )
-            st = self.backend.get_status() or {}
-            self.sample_rate = float(st.get("actual_sample_rate_sps",
-                                           getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS)))
-            self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
-            log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
+            if self.backend is None:
+                # Backend в режиме ожидания файла
+                log.warning("Backend in file_wait mode - waiting for CF32 file")
+                # Отключаем BB shift для file_wait режима
+                self.effective_bb_shift_enable = False
+                self.effective_bb_shift_hz = 0.0
+                self.sample_rate = float(SAMPLE_RATE_SPS)
+                self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+                self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+            else:
+                st = self.backend.get_status() or {}
+                self.sample_rate = float(st.get("actual_sample_rate_sps",
+                                               getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS)))
+                self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+                self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+                log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
         except Exception as e:
             log.error(f"Backend init failed: {e}")
-            raise
+            # Попытка fallback на file_wait
+            try:
+                self.backend = safe_make_backend("file", on_fail="file_wait")
+                if self.backend is None:
+                    log.warning("Fallback to file_wait mode")
+                    self.sample_rate = float(SAMPLE_RATE_SPS)
+                    self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+                    self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+            except:
+                raise
 
     # ---------------- Threads ----------------
     def start(self):
@@ -245,6 +439,9 @@ class BeaconDSPService:
 
     # ---------------- Reader loop ----------------
     def _read_block(self, nsamps: int) -> np.ndarray:
+        if self.backend is None:
+            # В режиме ожидания файла возвращаем пустой массив
+            return np.array([], dtype=np.complex64)
         return self.backend.read(nsamps)
 
     def _append_samples(self, x: np.ndarray):
@@ -304,7 +501,7 @@ class BeaconDSPService:
         st = Status(
             sdr=str(getattr(self.backend, "driver", "?")),
             fs=float(self.sample_rate),
-            bb_shift_hz=float(BB_SHIFT_HZ if BB_SHIFT_ENABLE else 0.0),
+            bb_shift_hz=float(self.effective_bb_shift_hz),
             target_signal_hz=float(TARGET_SIGNAL_HZ),
             thresh_dbm=float(PULSE_THRESH_DBM),
             read_chunk=int(READ_CHUNK),
@@ -316,8 +513,8 @@ class BeaconDSPService:
         base_idx = self.sample_counter
         x = samples.copy()
 
-        # BB shift
-        if BB_SHIFT_ENABLE and abs(BB_SHIFT_HZ) > 0:
+        # BB shift (используем эффективные значения)
+        if self.effective_bb_shift_enable and abs(self.effective_bb_shift_hz) > 0:
             n = np.arange(x.size, dtype=np.float64)
             mixer = np.exp(1j * (self.nco_phase + self.nco_k * n)).astype(np.complex64)
             x *= mixer
@@ -638,7 +835,7 @@ class BeaconDSPService:
 
     # ---------------- REP server ----------------
     def _rep_loop(self):
-        global PULSE_THRESH_DBM, RMS_WIN_MS
+        global PULSE_THRESH_DBM, RMS_WIN_MS, TARGET_SIGNAL_HZ
         while not self._stop:
             try:
                 msg = self.rep.recv_json(flags=0)
@@ -651,7 +848,7 @@ class BeaconDSPService:
                     self.rep.send_json({"ok": True, "status": asdict(Status(
                         sdr=str(getattr(self.backend, "driver", "?")),
                         fs=float(self.sample_rate),
-                        bb_shift_hz=float(BB_SHIFT_HZ if BB_SHIFT_ENABLE else 0.0),
+                        bb_shift_hz=float(self.effective_bb_shift_hz),
                         target_signal_hz=float(TARGET_SIGNAL_HZ),
                         thresh_dbm=float(PULSE_THRESH_DBM),
                         read_chunk=int(READ_CHUNK),
@@ -688,16 +885,17 @@ class BeaconDSPService:
                 elif cmd == "get_sdr_config":
                     # Возвращаем текущую конфигурацию SDR
                     config = {
-                        "center_freq_hz": self.backend.center_freq if hasattr(self.backend, 'center_freq') else 406000000,
+                        "backend_name": self.backend_name if self.backend_name else "file",
+                        "center_freq_hz": self.backend.center_freq if (self.backend and hasattr(self.backend, 'center_freq')) else 406000000,
                         "sample_rate_sps": self.sample_rate,
-                        "bb_shift_enable": True,  # TODO: получить из NCO
-                        "bb_shift_hz": IF_OFFSET_HZ,
+                        "bb_shift_enable": self.effective_bb_shift_enable,
+                        "bb_shift_hz": self.effective_bb_shift_hz,
                         "freq_corr_hz": 0,  # TODO: получить из backend
                         "agc": False,  # TODO: получить из backend
-                        "gain_db": self.backend.gain if hasattr(self.backend, 'gain') else 30.0,
+                        "gain_db": self.backend.gain if (self.backend and hasattr(self.backend, 'gain')) else 30.0,
                         "bias_t": False,  # TODO: получить из backend
                         "antenna": "RX",  # TODO: получить из backend
-                        "device": getattr(self.backend, 'device_info', 'Unknown device')
+                        "device": getattr(self.backend, 'device_info', 'Unknown device') if self.backend else "File wait mode"
                     }
                     self.rep.send_json({"ok": True, "config": config})
                 elif cmd == "set_sdr_config":
@@ -742,8 +940,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Headless Beacon DSP Service")
     ap.add_argument("--pub", default=DEFAULT_PUB_ADDR, help="ZeroMQ PUB address (bind)")
     ap.add_argument("--rep", default=DEFAULT_REP_ADDR, help="ZeroMQ REP address (bind)")
-    ap.add_argument("--backend", default=os.environ.get("BACKEND_NAME", "soapy_rtl"), help="Backend name (soapy_rtl/soapy_hackrf/soapy_airspy/soapy_sdrplay/file)")
-    ap.add_argument("--backend-args", default=None, help="Backend args JSON")
+    ap.add_argument("--backend", default=os.environ.get("BACKEND_NAME", "auto"),
+                    help="Backend name (auto/soapy_rtl/soapy_hackrf/soapy_airspy/soapy_sdrplay/rsa306/file)")
+    ap.add_argument("--backend-args", default=None, help="Backend args JSON (for soapy: device args, for file: path/params)")
     ap.add_argument("--jsonl", default=None, help="Path to JSONL session file")
     args = ap.parse_args()
 
