@@ -55,7 +55,7 @@ def db10(x: np.ndarray) -> np.ndarray:
 
 # -------------------- DspServiceClient --------------------
 class DspServiceClient:
-    """Тонкая обёртка над ZeroMQ REP для beacon_dsp_service.py."""
+    """Тонкая обёртка над ZeroMQ PUB/REP для beacon_dsp_service.py."""
     def __init__(self, pub_addr: str = PUB_ADDR_DEFAULT, rep_addr: str = REP_ADDR_DEFAULT):
         if zmq is None:
             raise RuntimeError("pyzmq не установлен. Установите пакет 'pyzmq'")
@@ -64,6 +64,14 @@ class DspServiceClient:
         self.rep_addr = rep_addr
         self._req_lock = threading.Lock()
         self._req_socket_broken = False
+        self._stop = False
+
+        # SUB (для pulse/psk событий)
+        self.sub = self.ctx.socket(zmq.SUB)
+        self.sub.connect(self.pub_addr)
+        self.sub.setsockopt_string(zmq.SUBSCRIBE, "")
+        self._sub_thread = None
+        self._cb = None
 
         # REQ (will be created/recreated by _ensure_req_socket)
         self.req = None
@@ -149,13 +157,48 @@ class DspServiceClient:
     def set_params(self, **params) -> Dict[str, Any]:
         return self.send_cmd("set_params", **params)
 
+    # ---- SUB stream ----
+    def subscribe_events(self, callback):
+        """Подписка на pulse/psk события из PUB канала."""
+        self._cb = callback
+        if self._sub_thread and self._sub_thread.is_alive():
+            return
+        self._stop = False
+        self._sub_thread = threading.Thread(target=self._sub_loop, daemon=True)
+        self._sub_thread.start()
+
+    def _sub_loop(self):
+        """SUB loop для приёма pulse/psk событий."""
+        poller = zmq.Poller()
+        poller.register(self.sub, zmq.POLLIN)
+        while not self._stop:
+            socks = dict(poller.poll(200))
+            if self.sub in socks and socks[self.sub] == zmq.POLLIN:
+                try:
+                    line = self.sub.recv_string(flags=zmq.NOBLOCK)
+                    obj = json.loads(line)
+                    if self._cb:
+                        self._cb(obj)
+                except Exception:
+                    pass
+
     def close(self):
+        self._stop = True
+        try:
+            if self._sub_thread:
+                self._sub_thread.join(timeout=0.3)
+        except Exception:
+            pass
         with self._req_lock:
             try:
                 if self.req:
                     self.req.close(0)
             except Exception:
                 pass
+        try:
+            self.sub.close(0)
+        except Exception:
+            pass
 
 # -------------------- UI (single poll loop) --------------------
 class Dsp2PlotUI:
@@ -182,6 +225,9 @@ class Dsp2PlotUI:
         # Клиент сервиса
         self.client = DspServiceClient(pub_addr=pub_addr, rep_addr=rep_addr)
         self._svc_proc = None
+
+        # Подписка на pulse/psk события
+        self.client.subscribe_events(self._on_pulse_event)
 
         # Логирование старта
         print(f"[startup] Connecting to DSP service")
@@ -294,6 +340,48 @@ class Dsp2PlotUI:
             print("[startup] --autostart: sending start_acquire")
             self.client.start_acquire()
 
+    # ---------- Pulse events from SUB ----------
+    def _on_pulse_event(self, obj: Dict[str, Any]):
+        """Обработка pulse/psk событий из PUB канала (в SUB потоке)."""
+        typ = obj.get("type")
+        if typ == "pulse":
+            # Pulse event - обновить графики Phase/FM/RMS
+            px = np.array(obj.get("phase_xs_ms", []), dtype=np.float64)
+            py = np.array(obj.get("phase_ys_rad", []), dtype=np.float64)
+            fx = np.array(obj.get("fr_xs_ms", []), dtype=np.float64)
+            fy = np.array(obj.get("fr_ys_hz", []), dtype=np.float64)
+            rms = np.array(obj.get("rms_ms_dbm", []), dtype=np.float64)
+
+            if px.size > 1 and rms.size == px.size:
+                self._pulse_rms_x = px
+                self._pulse_rms_y = rms
+                self.ln_pulse.set_data(px, rms)
+                self.ax_pulse.set_xlim(px.min(), px.max())
+                ymin, ymax = np.nanmin(rms), np.nanmax(rms)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
+
+            if px.size > 1 and py.size == px.size:
+                self._phase_x = px
+                self._phase_y = py
+                self.ln_phase.set_data(px, py)
+                self.ax_phase.set_xlim(px.min(), px.max())
+
+            if fx.size > 1 and fy.size == fx.size:
+                self._fm_x = fx
+                self._fm_y = fy
+                self.ln_fm.set_data(fx, fy)
+                self.ax_fm.set_xlim(fx.min(), fx.max())
+                ymin, ymax = np.nanmin(fy), np.nanmax(fy)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_fm.set_ylim(ymin - 50, ymax + 50)
+
+            self.fig2.canvas.draw_idle()
+
+        elif typ == "psk":
+            # PSK decoded message
+            pass  # Можно добавить обработку декодированных сообщений
+
     # ---------- Single poll loop ----------
     def _poll_status(self):
         """
@@ -301,7 +389,7 @@ class Dsp2PlotUI:
         1. get_status
         2. Обновить status bar
         3. Обновить кнопки
-        4. Если есть новые данные → обновить графики
+        4. Обновить RMS график (Sliding RMS)
         """
         st_rep = self.client.get_status()
         if not st_rep.get("ok", False):
@@ -321,8 +409,8 @@ class Dsp2PlotUI:
         # Обновить состояние кнопок
         self._update_buttons()
 
-        # Обновить графики если есть данные
-        self._update_plots(st)
+        # Обновить RMS график (Sliding RMS)
+        self._update_rms_plot(st)
 
     def _update_status_bar(self):
         """Обновить строку статуса (suptitle) на Fig1."""
@@ -357,9 +445,8 @@ class Dsp2PlotUI:
             self.btn_start.ax.set_facecolor('lightyellow')
             self.btn_stop.ax.set_facecolor('lightyellow')
 
-    def _update_plots(self, st: Dict[str, Any]):
-        """Обновить графики из данных get_status."""
-        # RMS график (Sliding RMS)
+    def _update_rms_plot(self, st: Dict[str, Any]):
+        """Обновить RMS график (Sliding RMS) из get_status."""
         t_s = st.get("t_s", [])
         last_rms_dbm = st.get("last_rms_dbm", [])
         if t_s and last_rms_dbm:
@@ -372,44 +459,6 @@ class Dsp2PlotUI:
                 if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
                     self.ax_lvl.set_ylim(ymin - 2, ymax + 2)
             self.fig1.canvas.draw_idle()
-
-        # Pulse/Phase/FM графики (из последнего pulse события)
-        # Сервис публикует pulse данные в status после обработки
-        pulse_data = st.get("pulse", {})
-        if pulse_data:
-            # RMS
-            px = np.array(pulse_data.get("phase_xs_ms", []), dtype=np.float64)
-            rms = np.array(pulse_data.get("rms_ms_dbm", []), dtype=np.float64)
-            if px.size > 1 and rms.size == px.size:
-                self._pulse_rms_x = px
-                self._pulse_rms_y = rms
-                self.ln_pulse.set_data(px, rms)
-                self.ax_pulse.set_xlim(px.min(), px.max())
-                ymin, ymax = np.nanmin(rms), np.nanmax(rms)
-                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                    self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
-
-            # Phase
-            py = np.array(pulse_data.get("phase_ys_rad", []), dtype=np.float64)
-            if px.size > 1 and py.size == px.size:
-                self._phase_x = px
-                self._phase_y = py
-                self.ln_phase.set_data(px, py)
-                self.ax_phase.set_xlim(px.min(), px.max())
-
-            # FM
-            fx = np.array(pulse_data.get("fr_xs_ms", []), dtype=np.float64)
-            fy = np.array(pulse_data.get("fr_ys_hz", []), dtype=np.float64)
-            if fx.size > 1 and fy.size == fx.size:
-                self._fm_x = fx
-                self._fm_y = fy
-                self.ln_fm.set_data(fx, fy)
-                self.ax_fm.set_xlim(fx.min(), fx.max())
-                ymin, ymax = np.nanmin(fy), np.nanmax(fy)
-                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                    self.ax_fm.set_ylim(ymin - 50, ymax + 50)
-
-            self.fig2.canvas.draw_idle()
 
     def _can_send_command(self) -> bool:
         """Проверка анти-дребезга: разрешить команду если прошло >= debounce_ms."""
