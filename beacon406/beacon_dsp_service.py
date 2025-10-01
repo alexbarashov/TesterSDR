@@ -49,7 +49,7 @@ from lib.backends import safe_make_backend, autodetect_soapy_driver
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.processing_fm import fm_discriminator
-from lib.logger import get_logger, setup_logging
+from lib.logger import get_logger, setup_logging, init_logger
 
 # -----------------------
 # Константы (как в plot)
@@ -93,8 +93,13 @@ ROOT                = Path.cwd()
 CAPTURE_DIR         = ROOT / "captures"
 CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
-setup_logging()
-log = get_logger(__name__)
+import logging
+
+setup_logging("DEBUG")
+log = init_logger(__name__)
+#log = get_logger(__name__)
+log.info("DSP service starting (root=%s)",
+         logging.getLevelName(logging.getLogger().level))
 
 @dataclass
 class Status:
