@@ -321,8 +321,8 @@ class Dsp2PlotUI:
         self.btn_exit2 = Button(ax_button_exit2, "Выход")
         self.btn_exit2.on_clicked(self._on_exit)
 
-        # Single poll таймер
-        self._timer = self.fig1.canvas.new_timer(interval=300)  # 300ms poll
+        # Single poll таймер (500ms для снижения нагрузки)
+        self._timer = self.fig1.canvas.new_timer(interval=500)  # 500ms poll
         self._timer.add_callback(self._poll_status)
         self._timer.start()
 
@@ -385,32 +385,40 @@ class Dsp2PlotUI:
     # ---------- Single poll loop ----------
     def _poll_status(self):
         """
-        Основной цикл опроса (вызывается таймером каждые 300ms):
+        Основной цикл опроса (вызывается таймером каждые 500ms):
         1. get_status
         2. Обновить status bar
         3. Обновить кнопки
         4. Обновить RMS график (Sliding RMS)
         """
-        st_rep = self.client.get_status()
-        if not st_rep.get("ok", False):
-            return
+        try:
+            st_rep = self.client.get_status()
+            if not st_rep.get("ok", False):
+                # Если ошибка - показать в status bar
+                error = st_rep.get("error", "Connection error")
+                self.fig1.suptitle(f"ERROR: {error}", fontsize=10, color='red')
+                return
 
-        st = st_rep.get("status", {})
-        self.last_status = st
+            st = st_rep.get("status", {})
+            self.last_status = st
 
-        # Обновить sample_rate
-        fs = float(st.get("fs", self.sample_rate))
-        if fs > 0:
-            self.sample_rate = fs
+            # Обновить sample_rate
+            fs = float(st.get("fs", self.sample_rate))
+            if fs > 0:
+                self.sample_rate = fs
 
-        # Обновить status bar
-        self._update_status_bar()
+            # Обновить status bar
+            self._update_status_bar()
 
-        # Обновить состояние кнопок
-        self._update_buttons()
+            # Обновить состояние кнопок
+            self._update_buttons()
 
-        # Обновить RMS график (Sliding RMS)
-        self._update_rms_plot(st)
+            # Обновить RMS график (Sliding RMS)
+            self._update_rms_plot(st)
+        except Exception as e:
+            # Не падать при ошибках poll
+            print(f"[poll_status] error: {e}")
+            self.fig1.suptitle(f"ERROR: {e}", fontsize=10, color='red')
 
     def _update_status_bar(self):
         """Обновить строку статуса (suptitle) на Fig1."""
