@@ -22,7 +22,8 @@
       "Bash(set PYTHONIOENCODING=utf-8)",
       "Bash(chcp:*)",
       "Bash(timeout 30 python test_file_selection_en.py)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []
