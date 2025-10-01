@@ -1,23 +1,28 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 beacon_dsp2plot.py — UI-клиент к beacon_dsp_service.py (ZeroMQ)
-Сохраняет внешний вид и UX «-plot», но все DSP берёт из сервиса.
-- Подписка на PUB: status / pulse / psk
-- Команды в REP: start/stop/set_params/get_status/get_sdr_config/set_sdr_config/save_sigmf
-- Поддержка backend-кнопок (Auto/RTL/HackRF/Airspy/SDRplay/RSA/File)
-- В режиме File: BB_SHIFT отключён на стороне сервиса (инвариант)
+Обновлённая версия согласно ТЗ 251001-3:
+- Мгновенный ACK для всех команд
+- Single poll loop (без SUB событий)
+- Status bar с backend/state/ready/fs/bb_shift/thresh
+- Анти-дребезг кнопок
+- Стабильный рендер в file режиме
 """
 import os
 import sys
 import json
 import time
 import threading
-import queue
 from dataclasses import dataclass
-from typing import Optional, Callable, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 from pathlib import Path
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import codecs
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, errors='replace')
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, errors='replace')
 
 # UI
 import numpy as np
@@ -32,7 +37,7 @@ from tkinter import filedialog
 import tkinter as tk
 import signal
 
-# ZMQ (optional soft dependency for dev boxes)
+# ZMQ
 try:
     import zmq
 except Exception:
@@ -50,29 +55,19 @@ def db10(x: np.ndarray) -> np.ndarray:
 
 # -------------------- DspServiceClient --------------------
 class DspServiceClient:
-    """Тонкая обёртка над ZeroMQ PUB/REP beacon_dsp_service.py."""
+    """Тонкая обёртка над ZeroMQ REP для beacon_dsp_service.py."""
     def __init__(self, pub_addr: str = PUB_ADDR_DEFAULT, rep_addr: str = REP_ADDR_DEFAULT):
         if zmq is None:
             raise RuntimeError("pyzmq не установлен. Установите пакет 'pyzmq'")
         self.ctx = zmq.Context.instance()
         self.pub_addr = pub_addr
         self.rep_addr = rep_addr
-        self._stop = False
         self._req_lock = threading.Lock()
         self._req_socket_broken = False
-
-        # SUB
-        self.sub = self.ctx.socket(zmq.SUB)
-        self.sub.connect(self.pub_addr)
-        self.sub.setsockopt_string(zmq.SUBSCRIBE, "")  # все события
 
         # REQ (will be created/recreated by _ensure_req_socket)
         self.req = None
         self._ensure_req_socket()
-
-        self._sub_thread: Optional[threading.Thread] = None
-        self._cb: Optional[Callable[[Dict[str, Any]], None]] = None
-
 
     def _ensure_req_socket(self):
         """Ensure REQ socket is connected and ready. Recreate if needed."""
@@ -86,161 +81,129 @@ class DspServiceClient:
             pass
 
         self.req = self.ctx.socket(zmq.REQ)
-        # Set reasonable timeouts for stable operation
-        # Increased timeout for file operations which may take longer
+        # Короткий таймаут для мгновенного ACK
         try:
-            self.req.setsockopt(zmq.RCVTIMEO, 10000)  # 10 second receive timeout for file operations
-            self.req.setsockopt(zmq.SNDTIMEO, 5000)   # 5 second send timeout
-            self.req.setsockopt(zmq.LINGER, 0)        # Don't wait on close
+            self.req.setsockopt(zmq.RCVTIMEO, 2000)  # 2s для ACK
+            self.req.setsockopt(zmq.SNDTIMEO, 1000)  # 1s send
+            self.req.setsockopt(zmq.LINGER, 0)
         except Exception:
             pass
 
         self.req.connect(self.rep_addr)
         self._req_socket_broken = False
 
-    def quick_status_check(self):
-        """Quick status check with short timeout to test if service is responsive."""
-        temp_req = self.ctx.socket(zmq.REQ)
-        try:
-            temp_req.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout
-            temp_req.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second timeout
-            temp_req.setsockopt(zmq.LINGER, 0)
-            temp_req.connect(self.rep_addr)
-
-            import json
-            req = {"cmd": "get_status"}
-            temp_req.send_string(json.dumps(req))
-            resp_str = temp_req.recv_string()
-            rep = json.loads(resp_str)
-            return rep if isinstance(rep, dict) else None
-        except Exception:
-            return None
-        finally:
-            temp_req.close(0)
-
-    # ---- stream ----
-    def subscribe_events(self, callback: Callable[[Dict[str, Any]], None]):
-        self._cb = callback
-        if self._sub_thread and self._sub_thread.is_alive():
-            return
-        self._stop = False
-        self._sub_thread = threading.Thread(target=self._sub_loop, daemon=True)
-        self._sub_thread.start()
-
-    def _sub_loop(self):
-        poller = zmq.Poller()
-        poller.register(self.sub, zmq.POLLIN)
-        while not self._stop:
-            socks = dict(poller.poll(200))
-            if self.sub in socks and socks[self.sub] == zmq.POLLIN:
-                try:
-                    line = self.sub.recv_string(flags=zmq.NOBLOCK)
-                    obj = json.loads(line)
-                    if self._cb:
-                        self._cb(obj)
-                except Exception:
-                    pass
-
-    # ---- commands (REQ/REP) ----
-    def _cmd(self, name: str, **kwargs) -> Dict[str, Any]:
+    # ---- commands (REQ/REP) с мгновенным ACK и логированием ----
+    def send_cmd(self, name: str, **kwargs) -> Dict[str, Any]:
+        """
+        Отправляет команду и ждёт быстрый ACK.
+        Возвращает {"ok": bool, "error"?: str, ...}
+        Печатает: [cmd=<name>] ack=<dt> ms → {ok: ...}
+        """
         msg = {"cmd": name, **kwargs}
+        t0 = time.perf_counter()
 
-        # Try up to 5 times for better reliability during backend switches
-        max_retries = 5
-
-        for attempt in range(max_retries):
-            with self._req_lock:
-                try:
-                    self._ensure_req_socket()
-
-                    # Use blocking calls - the socket timeout options will handle timeouts
-                    self.req.send_json(msg)
-                    rep = self.req.recv_json()
-
-                    # Success - reset failure flag
-                    self._req_socket_broken = False
-                    return rep if isinstance(rep, dict) else {"ok": False, "error": "bad reply"}
-
-                except zmq.error.Again:
-                    # Timeout - mark socket as potentially broken
-                    self._req_socket_broken = True
-                    if attempt < max_retries - 1:
-                        time.sleep(0.2 * (attempt + 1))  # Progressive backoff
-                        continue
-                    else:
-                        return {"ok": False, "error": "Timeout waiting for DSP service"}
-
-                except Exception as e:
-                    # Other error - mark socket as broken and retry
-                    self._req_socket_broken = True
-                    if attempt < max_retries - 1:
-                        time.sleep(0.2 * (attempt + 1))  # Progressive backoff
-                        continue
-                    else:
-                        return {"ok": False, "error": f"Communication error: {e}"}
-
-        # This should never be reached due to the else clauses above, but just in case
-        return {"ok": False, "error": "Max retries exceeded"}
-
-    def start_acquire(self) -> Dict[str, Any]: return self._cmd("start_acquire")
-    def stop_acquire(self) -> Dict[str, Any]: return self._cmd("stop_acquire")
-    def get_status(self) -> Dict[str, Any]: return self._cmd("get_status")
-    def get_sdr_config(self) -> Dict[str, Any]: return self._cmd("get_sdr_config")
-    def set_sdr_config(self, **cfg) -> Dict[str, Any]:
-        # Send config wrapped in 'config' field for DSP service compatibility
-        return self._cmd("set_sdr_config", config=cfg)
-    def set_params(self, **params) -> Dict[str, Any]: return self._cmd("set_params", **params)
-    def save_sigmf(self) -> Dict[str, Any]: return self._cmd("save_sigmf")
-    # file ops (если реализованы в сервисе)
-    def file_load(self, path: str, start_s: float = 0.0, loop: bool = False) -> Dict[str, Any]:
-        return self._cmd("file_load", path=path, start_s=float(start_s), loop=bool(loop))
-    def file_seek(self, pos_s: float) -> Dict[str, Any]: return self._cmd("file_seek", pos_s=float(pos_s))
-    def file_play(self, rate: float = 1.0) -> Dict[str, Any]: return self._cmd("file_play", rate=float(rate))
-    def file_pause(self) -> Dict[str, Any]: return self._cmd("file_pause")
-    def file_get_info(self) -> Dict[str, Any]: return self._cmd("file_get_info")
-
-    def close(self):
-        self._stop = True
-        try:
-            if self._sub_thread:
-                self._sub_thread.join(timeout=0.3)
-        except Exception:
-            pass
         with self._req_lock:
             try:
-                if self.req: self.req.close(0)
-            except Exception: pass
-        try: self.sub.close(0)
-        except Exception: pass
+                self._ensure_req_socket()
+                self.req.send_json(msg)
+                rep = self.req.recv_json()
+                self._req_socket_broken = False
 
-# -------------------- UI (2 окна как в -plot) --------------------
+                dt_ms = (time.perf_counter() - t0) * 1000
+                ok_str = "OK" if rep.get("ok", False) else "ERR"
+                print(f"[cmd={name}] ack={dt_ms:.1f} ms → {ok_str}")
+
+                return rep if isinstance(rep, dict) else {"ok": False, "error": "bad reply"}
+
+            except zmq.error.Again:
+                self._req_socket_broken = True
+                dt_ms = (time.perf_counter() - t0) * 1000
+                print(f"[cmd={name}] TIMEOUT after {dt_ms:.1f} ms")
+                return {"ok": False, "error": "Timeout waiting for DSP service"}
+
+            except Exception as e:
+                self._req_socket_broken = True
+                dt_ms = (time.perf_counter() - t0) * 1000
+                print(f"[cmd={name}] ERROR after {dt_ms:.1f} ms: {e}")
+                return {"ok": False, "error": f"Communication error: {e}"}
+
+    # Команды согласно ТЗ
+    def echo(self, **payload) -> Dict[str, Any]:
+        return self.send_cmd("echo", payload=payload)
+
+    def get_status(self) -> Dict[str, Any]:
+        return self.send_cmd("get_status")
+
+    def start_acquire(self) -> Dict[str, Any]:
+        return self.send_cmd("start_acquire")
+
+    def stop_acquire(self) -> Dict[str, Any]:
+        return self.send_cmd("stop_acquire")
+
+    def set_sdr_config(self, **cfg) -> Dict[str, Any]:
+        return self.send_cmd("set_sdr_config", **cfg)
+
+    def save_sigmf(self) -> Dict[str, Any]:
+        return self.send_cmd("save_sigmf")
+
+    def set_params(self, **params) -> Dict[str, Any]:
+        return self.send_cmd("set_params", **params)
+
+    def close(self):
+        with self._req_lock:
+            try:
+                if self.req:
+                    self.req.close(0)
+            except Exception:
+                pass
+
+# -------------------- UI (single poll loop) --------------------
 class Dsp2PlotUI:
-    def __init__(self, pub_addr: str, rep_addr: str):
-        # Состояние для графиков
+    def __init__(self, pub_addr: str, rep_addr: str, autostart: bool = False):
+        # Состояние
         self.last_status: Dict[str, Any] = {}
-        self.last_pulse: Dict[str, Any] = {}
-        self.last_psk: Dict[str, Any] = {}
-        self.last_msg_hex: Optional[str] = None
         self.sample_rate: float = 1_000_000.0
+        self.autostart = autostart
 
-        # Очередь событий из SUB-потока
-        self.ev_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=128)
+        # Анти-дребезг: время последней команды
+        self._last_cmd_time: float = 0.0
+        self._cmd_debounce_ms: float = 150.0
+
+        # Данные для графиков
+        self._lvl_x: np.ndarray = np.array([], dtype=np.float64)
+        self._lvl_y: np.ndarray = np.array([], dtype=np.float64)
+        self._pulse_rms_x: np.ndarray = np.array([], dtype=np.float64)
+        self._pulse_rms_y: np.ndarray = np.array([], dtype=np.float64)
+        self._phase_x: np.ndarray = np.array([], dtype=np.float64)
+        self._phase_y: np.ndarray = np.array([], dtype=np.float64)
+        self._fm_x: np.ndarray = np.array([], dtype=np.float64)
+        self._fm_y: np.ndarray = np.array([], dtype=np.float64)
 
         # Клиент сервиса
         self.client = DspServiceClient(pub_addr=pub_addr, rep_addr=rep_addr)
         self._svc_proc = None
-        self.client.subscribe_events(self._on_event)
-        # первичный статус
-        try:
-            st = self.client.get_status()
-            if isinstance(st, dict):
-                st_payload = st.get("status", st)
-                self.last_status = st_payload
-                self.sample_rate = float(st_payload.get("fs", self.sample_rate))
-        except Exception:
-            pass
 
-        # ----- Figure 1: Sliding RMS (как раньше) -----
+        # Логирование старта
+        print(f"[startup] Connecting to DSP service")
+        print(f"[startup] REP: {rep_addr}")
+        print(f"[startup] PUB: {pub_addr}")
+
+        # Инициализация: echo → get_status
+        print("[startup] Testing connection with echo...")
+        echo_rep = self.client.echo(test="hello")
+        if not echo_rep.get("ok", False):
+            print(f"[startup] WARNING: echo failed: {echo_rep}")
+
+        print("[startup] Getting initial status...")
+        st_rep = self.client.get_status()
+        if st_rep.get("ok", False):
+            self.last_status = st_rep.get("status", {})
+            self.sample_rate = float(self.last_status.get("fs", self.sample_rate))
+            print(f"[startup] Initial status: backend={self.last_status.get('backend', '?')} ready={self.last_status.get('ready', False)}")
+        else:
+            print(f"[startup] WARNING: get_status failed: {st_rep}")
+
+        # ----- Figure 1: Sliding RMS -----
         self.fig1, self.ax_lvl = plt.subplots(num="Sliding RMS — realtime", figsize=(9, 2.5))
         self.fig1.subplots_adjust(bottom=0.35, top=0.85)
 
@@ -248,6 +211,9 @@ class Dsp2PlotUI:
         self.ax_lvl.set_xlabel("Время, с")
         self.ax_lvl.set_ylabel("RMS, dBm")
         self.ax_lvl.grid(True, alpha=0.3)
+
+        # Status bar (title)
+        self._update_status_bar()
 
         # Кнопки backend
         buttons = [
@@ -266,9 +232,13 @@ class Dsp2PlotUI:
             btn.on_clicked(lambda _evt, b=backend: self._on_backend_select(b))
             self.backend_buttons[backend] = btn
 
-        ax_button_file = self.fig1.add_axes([0.73, 0.01, 0.12, 0.06])
-        self.btn_file = Button(ax_button_file, "Открыть")
-        self.btn_file.on_clicked(self._on_file_select)
+        ax_button_start = self.fig1.add_axes([0.66, 0.01, 0.08, 0.06])
+        self.btn_start = Button(ax_button_start, "Start")
+        self.btn_start.on_clicked(self._on_start)
+
+        ax_button_stop = self.fig1.add_axes([0.75, 0.01, 0.08, 0.06])
+        self.btn_stop = Button(ax_button_stop, "Stop")
+        self.btn_stop.on_clicked(self._on_stop)
 
         ax_button_exit = self.fig1.add_axes([0.86, 0.01, 0.12, 0.06])
         self.btn_exit = Button(ax_button_exit, "Выход")
@@ -276,12 +246,12 @@ class Dsp2PlotUI:
 
         # ----- Figure 2: Pulse + Phase + FM -----
         self.fig2, (self.ax_pulse, self.ax_phase, self.ax_fm) = plt.subplots(
-            3, 1, figsize=(14, 8.6), height_ratios=[1, 1, 1]
+            3, 1, figsize=(14, 8.6), height_ratios=[1, 1, 1], num="Pulse Analysis"
         )
         (self.ln_pulse,) = self.ax_pulse.plot([], [], lw=1.4)
         self.ax_pulse.set_ylabel("RMS, dBm")
         self.ax_pulse.grid(True, alpha=0.3)
-        self.ax_pulse.set_xlabel("Время, мс (RMS окно)")
+        self.ax_pulse.set_xlabel("Время, мс")
 
         (self.ln_phase,) = self.ax_phase.plot([], [], lw=1.4)
         self.ax_phase.set_ylabel("Фаза, rad")
@@ -289,47 +259,28 @@ class Dsp2PlotUI:
         self.ax_phase.set_ylim(-1.5, +1.5)
 
         (self.ln_fm,) = self.ax_fm.plot([], [], lw=1.4)
-        self.ax_fm.set_xlabel("Время, мс (0 = старт импульса)")
+        self.ax_fm.set_xlabel("Время, мс")
         self.ax_fm.set_ylabel("FM, Hz")
         self.ax_fm.grid(True, alpha=0.3)
 
         self.fig2.subplots_adjust(hspace=0.5, top=0.92, bottom=0.15)
-        self.fig2.suptitle("Импульс: RMS + Фаза (±1.5 rad) + FM(Hz)")
+        self.fig2.suptitle("Импульс: RMS + Фаза + FM")
 
         # Нижние кнопки
-        ax_button_spec = self.fig2.add_axes([0.54, 0.01, 0.15, 0.06])
-        self.btn_spec = Button(ax_button_spec, "Спектр")
-        self.btn_spec.on_clicked(self._on_show_spectrum)
-
-        ax_button_stat = self.fig2.add_axes([0.22, 0.01, 0.15, 0.06])
-        self.btn_stat = Button(ax_button_stat, "Статус SDR")
-        self.btn_stat.on_clicked(self._on_show_sdr_status)
-
-        ax_button_params = self.fig2.add_axes([0.38, 0.01, 0.15, 0.06])
-        self.btn_params = Button(ax_button_params, "Параметры")
-        self.btn_params.on_clicked(self._on_show_params)
-
         ax_button_save = self.fig2.add_axes([0.70, 0.01, 0.15, 0.06])
         self.btn_save = Button(ax_button_save, "Save SigMF")
         self.btn_save.on_clicked(self._on_save_sigmf)
 
-        ax_button_stop = self.fig2.add_axes([0.86, 0.01, 0.12, 0.06])
-        self.btn_stop = Button(ax_button_stop, "Стоп")
-        self.btn_stop.on_clicked(self._on_toggle_updates)
+        ax_button_exit2 = self.fig2.add_axes([0.86, 0.01, 0.12, 0.06])
+        self.btn_exit2 = Button(ax_button_exit2, "Выход")
+        self.btn_exit2.on_clicked(self._on_exit)
 
-        ax_button_msg = self.fig2.add_axes([0.06, 0.01, 0.15, 0.06])
-        self.btn_msg = Button(ax_button_msg, "Сообщение")
-        self.btn_msg.on_clicked(self._on_show_message)
-
-        # Анимация/таймер обновления из очереди событий
-        self._updates_enabled = True
-        self._lvl_x: np.ndarray = np.array([], dtype=np.float64)
-        self._lvl_y: np.ndarray = np.array([], dtype=np.float64)
-        self._timer = self.fig1.canvas.new_timer(interval=200)
-        self._timer.add_callback(self._drain_events)
+        # Single poll таймер
+        self._timer = self.fig1.canvas.new_timer(interval=300)  # 300ms poll
+        self._timer.add_callback(self._poll_status)
         self._timer.start()
 
-        # Обработчики закрытия окон и горячие клавиши
+        # Обработчики закрытия окон
         try:
             self.fig1.canvas.mpl_connect('close_event', self._on_close)
             self.fig2.canvas.mpl_connect('close_event', self._on_close)
@@ -338,120 +289,157 @@ class Dsp2PlotUI:
         except Exception:
             pass
 
+        # Autostart после инициализации
+        if self.autostart:
+            print("[startup] --autostart: sending start_acquire")
+            self.client.start_acquire()
 
-    # ---------- Event plumbing ----------
-    def _on_event(self, obj: Dict[str, Any]):
-        try:
-            self.ev_q.put_nowait(obj)
-        except queue.Full:
-            pass
+    # ---------- Single poll loop ----------
+    def _poll_status(self):
+        """
+        Основной цикл опроса (вызывается таймером каждые 300ms):
+        1. get_status
+        2. Обновить status bar
+        3. Обновить кнопки
+        4. Если есть новые данные → обновить графики
+        """
+        st_rep = self.client.get_status()
+        if not st_rep.get("ok", False):
+            return
 
-    def _drain_events(self):
-        drained = 0
-        while not self.ev_q.empty() and drained < 64:
-            drained += 1
-            try:
-                obj = self.ev_q.get_nowait()
-            except Exception:
-                break
-            typ = obj.get("type")
-            if typ == "status":
-                self.last_status = obj
-                fs = float(obj.get("fs", self.sample_rate))
-                if fs > 0: self.sample_rate = fs
-                lvl_dbm = obj.get("last_rms_dbm", None)
-                t_s = obj.get("t_s", None)
-                if lvl_dbm is not None and t_s is not None:
-                    self._lvl_x = np.array(t_s, dtype=np.float64)
-                    self._lvl_y = np.array(lvl_dbm, dtype=np.float64)
-                    self.ln_lvl.set_data(self._lvl_x, self._lvl_y)
-                    if self._lvl_x.size:
-                        self.ax_lvl.set_xlim(self._lvl_x[0], self._lvl_x[-1])
-                        ymin, ymax = np.nanmin(self._lvl_y), np.nanmax(self._lvl_y)
-                        if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                            self.ax_lvl.set_ylim(ymin - 2, ymax + 2)
-                    self.fig1.canvas.draw_idle()
+        st = st_rep.get("status", {})
+        self.last_status = st
 
-            elif typ == "pulse":
-                self.last_pulse = obj
-                if not self._updates_enabled:
-                    continue
-                px = np.array(obj.get("phase_xs_ms", []), dtype=np.float64)
-                py = np.array(obj.get("phase_ys_rad", []), dtype=np.float64)
-                fx = np.array(obj.get("fr_xs_ms", []), dtype=np.float64)
-                fy = np.array(obj.get("fr_ys_hz", []), dtype=np.float64)
-                rms = np.array(obj.get("rms_ms_dbm", []), dtype=np.float64)
+        # Обновить sample_rate
+        fs = float(st.get("fs", self.sample_rate))
+        if fs > 0:
+            self.sample_rate = fs
 
-                if rms.size and px.size == rms.size:
-                    self.ln_pulse.set_data(px, rms)
-                    self.ax_pulse.set_xlim(px.min(), px.max())
-                    ymin, ymax = np.nanmin(rms), np.nanmax(rms)
-                    if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                        self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
+        # Обновить status bar
+        self._update_status_bar()
 
-                if px.size and py.size and px.size == py.size:
-                    if px.size > 0 and py.size > 0:
-                        self.ln_phase.set_data(px, py)
-                        if px.size > 1:  # Need at least 2 points for xlim
-                            self.ax_phase.set_xlim(px.min(), px.max())
+        # Обновить состояние кнопок
+        self._update_buttons()
 
-                if fx.size and fy.size and fx.size == fy.size:
-                    # Ensure data is valid for matplotlib
-                    if fx.size > 0 and fy.size > 0:
-                        self.ln_fm.set_data(fx, fy)
-                        if fx.size > 1:  # Need at least 2 points for xlim
-                            self.ax_fm.set_xlim(fx.min(), fx.max())
-                        ymin, ymax = np.nanmin(fy), np.nanmax(fy)
-                        if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                            self.ax_fm.set_ylim(ymin - 50, ymax + 50)
+        # Обновить графики если есть данные
+        self._update_plots(st)
 
-                self.fig2.canvas.draw_idle()
+    def _update_status_bar(self):
+        """Обновить строку статуса (suptitle) на Fig1."""
+        s = self.last_status
+        backend = s.get("backend", "?")
+        acq_state = s.get("acq_state", "?")
+        ready = s.get("ready", False)
+        fs = s.get("fs", 0) or 0
+        bb_shift = s.get("bb_shift_hz", 0) or 0
+        thresh = s.get("thresh_dbm", -60.0)
 
-            elif typ == "psk":
-                self.last_psk = obj
-                self.last_msg_hex = obj.get("hex")
+        # Подсветка retuning
+        state_str = acq_state
+        if acq_state == "retuning":
+            state_str = f"⏳ {acq_state}"
 
+        txt = f"backend={backend} | state={state_str} | ready={ready} | fs={fs:.0f} | bb_shift={bb_shift:.0f} | thresh={thresh:.1f}"
+        self.fig1.suptitle(txt, fontsize=10)
 
-    def clean_exit(self, code: int = 0):
-        # Остановить таймер
-        try:
-            self._timer.stop()
-        except Exception:
-            pass
-        # Закрыть ZMQ/клиент
-        try:
-            self.client.close()
-        except Exception:
-            pass
-        # Закрыть окна
-        try:
-            import matplotlib.pyplot as _plt
-            _plt.close('all')
-        except Exception:
-            pass
-        # Stop auto-started service
-        try:
-            if getattr(self, '_svc_proc', None):
-                self._svc_proc.terminate()
-        except Exception:
-            pass
-        # Финальный выход
-        import sys
-        sys.exit(code)
+    def _update_buttons(self):
+        """Обновить состояние кнопок Start/Stop по acq_state."""
+        acq_state = self.last_status.get("acq_state", "stopped")
 
-    def _on_close(self, _evt):
-        self.clean_exit(0)
+        # Start активна если stopped, неактивна если running/retuning
+        if acq_state == "stopped":
+            self.btn_start.ax.set_facecolor('lightgreen')
+            self.btn_stop.ax.set_facecolor('lightgray')
+        elif acq_state == "running":
+            self.btn_start.ax.set_facecolor('lightgray')
+            self.btn_stop.ax.set_facecolor('lightcoral')
+        else:  # retuning, ready
+            self.btn_start.ax.set_facecolor('lightyellow')
+            self.btn_stop.ax.set_facecolor('lightyellow')
 
-    def _on_key(self, evt):
-        if evt.key in ('q', 'escape'):
-            self.clean_exit(0)
+    def _update_plots(self, st: Dict[str, Any]):
+        """Обновить графики из данных get_status."""
+        # RMS график (Sliding RMS)
+        t_s = st.get("t_s", [])
+        last_rms_dbm = st.get("last_rms_dbm", [])
+        if t_s and last_rms_dbm:
+            self._lvl_x = np.array(t_s, dtype=np.float64)
+            self._lvl_y = np.array(last_rms_dbm, dtype=np.float64)
+            self.ln_lvl.set_data(self._lvl_x, self._lvl_y)
+            if self._lvl_x.size > 1:
+                self.ax_lvl.set_xlim(self._lvl_x[0], self._lvl_x[-1])
+                ymin, ymax = np.nanmin(self._lvl_y), np.nanmax(self._lvl_y)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_lvl.set_ylim(ymin - 2, ymax + 2)
+            self.fig1.canvas.draw_idle()
+
+        # Pulse/Phase/FM графики (из последнего pulse события)
+        # Сервис публикует pulse данные в status после обработки
+        pulse_data = st.get("pulse", {})
+        if pulse_data:
+            # RMS
+            px = np.array(pulse_data.get("phase_xs_ms", []), dtype=np.float64)
+            rms = np.array(pulse_data.get("rms_ms_dbm", []), dtype=np.float64)
+            if px.size > 1 and rms.size == px.size:
+                self._pulse_rms_x = px
+                self._pulse_rms_y = rms
+                self.ln_pulse.set_data(px, rms)
+                self.ax_pulse.set_xlim(px.min(), px.max())
+                ymin, ymax = np.nanmin(rms), np.nanmax(rms)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
+
+            # Phase
+            py = np.array(pulse_data.get("phase_ys_rad", []), dtype=np.float64)
+            if px.size > 1 and py.size == px.size:
+                self._phase_x = px
+                self._phase_y = py
+                self.ln_phase.set_data(px, py)
+                self.ax_phase.set_xlim(px.min(), px.max())
+
+            # FM
+            fx = np.array(pulse_data.get("fr_xs_ms", []), dtype=np.float64)
+            fy = np.array(pulse_data.get("fr_ys_hz", []), dtype=np.float64)
+            if fx.size > 1 and fy.size == fx.size:
+                self._fm_x = fx
+                self._fm_y = fy
+                self.ln_fm.set_data(fx, fy)
+                self.ax_fm.set_xlim(fx.min(), fx.max())
+                ymin, ymax = np.nanmin(fy), np.nanmax(fy)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_fm.set_ylim(ymin - 50, ymax + 50)
+
+            self.fig2.canvas.draw_idle()
+
+    def _can_send_command(self) -> bool:
+        """Проверка анти-дребезга: разрешить команду если прошло >= debounce_ms."""
+        now = time.perf_counter()
+        dt_ms = (now - self._last_cmd_time) * 1000
+        if dt_ms < self._cmd_debounce_ms:
+            return False
+        self._last_cmd_time = now
+        return True
 
     # ---------- UI callbacks ----------
+    def _on_start(self, _event):
+        if not self._can_send_command():
+            return
+        self.client.start_acquire()
+
+    def _on_stop(self, _event):
+        if not self._can_send_command():
+            return
+        self.client.stop_acquire()
+
     def _on_backend_select(self, backend_name: str):
+        if not self._can_send_command():
+            return
+
         # For file backend, ask for file first
         if backend_name == "file":
             try:
-                root = tk.Tk(); root.withdraw()
+                root = tk.Tk()
+                root.withdraw()
                 path = filedialog.askopenfilename(
                     title="Выберите CF32 или SigMF",
                     filetypes=[("CF32", "*.cf32"), ("F32", "*.f32"), ("SigMF", "*.sigmf-meta"), ("All", "*.*")]
@@ -460,103 +448,60 @@ class Dsp2PlotUI:
                 if not path:
                     return  # User cancelled
             except Exception as e:
-                print("file open err:", e)
+                print(f"[file_dialog] error: {e}")
                 return
         else:
             path = None
 
-        # Stop current acquisition
-        print("[backend] stop_acquire", self.client.stop_acquire())
-        time.sleep(0.2)  # Small delay for service to process stop
-
-        # Get current config and update it
-        cfg_resp = self.client.get_sdr_config()
-        if cfg_resp and "config" in cfg_resp:
-            cfg = cfg_resp["config"]  # DSP service returns config in nested structure
-        else:
-            cfg = {}
-
-        # Update backend and file parameters
-        cfg["backend_name"] = backend_name
+        # Отправить set_sdr_config с мгновенным ACK
+        cfg = {"backend_name": backend_name}
         if backend_name == "file" and path:
-            cfg["backend_args"] = {"path": path}  # Pass file path as dict for DSP service
+            cfg["backend_args"] = path
             cfg["bb_shift_enable"] = False
             cfg["bb_shift_hz"] = 0
 
-        # Apply config - send directly without 'config' wrapper
-        print(f"[set_sdr_config] backend={backend_name}, file={path}")
-        rep = self.client.set_sdr_config(**cfg)
-        print("[set_sdr_config result]", rep)
-        time.sleep(0.2)  # Small delay for service to process config change
+        print(f"[backend_select] switching to {backend_name}")
+        self.client.set_sdr_config(**cfg)
+        # Не ждать долго — poll_status покажет retuning → ready
 
-        # Restart acquisition
-        print("[backend] start_acquire", self.client.start_acquire())
-
-    def _on_file_select(self, _event):
-        # This is the same as selecting File backend
-        self._on_backend_select("file")
+    def _on_save_sigmf(self, _event):
+        if not self._can_send_command():
+            return
+        rep = self.client.save_sigmf()
+        if rep.get("ok", False):
+            path = rep.get("path", "?")
+            print(f"[save] Saved to {path}")
 
     def _on_exit(self, _event):
         self.clean_exit(0)
 
-    def _on_show_spectrum(self, _event):
-        print("[info] Спектр вызывается кнопкой. Ожидайте pulse с fr_* данными.")
+    def _on_close(self, _evt):
+        self.clean_exit(0)
 
-    def _on_show_sdr_status(self, _event):
-        st = self.client.get_status()
-        fig, ax = plt.subplots(figsize=(9, 6))
-        ax.axis("off")
-        ax.set_title("SDR Status (snapshot)")
-        lines = []
-        if isinstance(st, dict):
-            st_payload = st.get("status", st)
-            for k, v in st_payload.items():
-                lines.append(f"{k}: {v}")
-        else:
-            lines.append("нет данных")
-        ax.text(0.02, 0.98, "\\n".join(lines), va="top", ha="left", family="monospace")
-        plt.tight_layout(); plt.show(block=False); plt.pause(0.1)
+    def _on_key(self, evt):
+        if evt.key in ('q', 'escape'):
+            self.clean_exit(0)
 
-    def _on_show_params(self, _event):
-        p = self.last_psk or {}
-        rows = [
-            ("length_ms", p.get("length_ms")),
-            ("preamble_ms", p.get("preamble_ms")),
-            ("baud", p.get("baud")),
-            ("pos_phase", p.get("pos_phase")),
-            ("neg_phase", p.get("neg_phase")),
-            ("rise_us", p.get("rise_us")),
-            ("fall_us", p.get("fall_us")),
-            ("asymmetry_pct", p.get("asymmetry_pct")),
-            ("hex", p.get("hex")),
-        ]
-        fig, ax = plt.subplots(figsize=(8, 4.5)); ax.axis("off")
-        ax.set_title("Phase Parameters (snapshot)")
-        txt = "\\n".join(f"{k:>14}: {v}" for k, v in rows)
-        ax.text(0.02, 0.98, txt, va="top", ha="left", family="monospace")
-        plt.tight_layout(); plt.show(block=False); plt.pause(0.1)
-
-    def _on_save_sigmf(self, _event):
-        rep = self.client.save_sigmf()
-        print("[save_sigmf]", rep)
-
-    def _on_toggle_updates(self, _event):
-        self._updates_enabled = not self._updates_enabled
-        self.btn_stop.label.set_text("Пуск" if not self._updates_enabled else "Стоп")
-
-    def _on_show_message(self, _event):
-        hex_msg = self.last_msg_hex
-        fig, ax = plt.subplots(figsize=(8, 3))
-        try: fig.canvas.manager.set_window_title("Декодированное сообщение")
-        except Exception: pass
-        ax.axis('off')
-        if not hex_msg:
-            ax.text(0.5, 0.5, "Нет сообщения.\\nСначала должен быть обнаружен PSK импульс.",
-                    ha='center', va='center', fontsize=12)
-        else:
-            ax.text(0.5, 0.5, f"HEX: {hex_msg}", ha='center', va='center', fontsize=12, family="monospace")
-        plt.tight_layout(); plt.show(block=False); plt.pause(0.1)
-
+    def clean_exit(self, code: int = 0):
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        try:
+            self.client.close()
+        except Exception:
+            pass
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        try:
+            if getattr(self, '_svc_proc', None):
+                self._svc_proc.terminate()
+        except Exception:
+            pass
+        import sys
+        sys.exit(code)
 
 # -------------------- Auto-start dsp_service --------------------
 import subprocess
@@ -568,10 +513,7 @@ def _candidate_service_paths() -> list:
         "beacon_dsp_service.py",
         str(here / "beacon_dsp_service.py"),
         str(here.parent / "beacon_dsp_service.py"),
-        str(here / "beacon406" / "beacon_dsp_service.py"),
-        str(here / "beacon406" / "apps" / "beacon_dsp_service.py"),
         str(Path.cwd() / "beacon_dsp_service.py"),
-        "/mnt/data/beacon_dsp_service.py",
     ]
     out = []
     for n in names:
@@ -581,7 +523,7 @@ def _candidate_service_paths() -> list:
                 out.append(str(pn))
         except Exception:
             pass
-    # dedup, keep order
+    # dedup
     seen = set()
     uniq = []
     for s in out:
@@ -591,10 +533,9 @@ def _candidate_service_paths() -> list:
     return uniq
 
 def _spawn_service_if_needed(client):
-    """Try get_status(); if it fails, spawn the service without args and wait until ready."""
+    """Try get_status(); if it fails, spawn the service and wait until ready."""
     try:
-        # Use quick check to avoid hanging on startup
-        rep = client.quick_status_check()
+        rep = client.get_status()
         if isinstance(rep, dict) and rep.get("ok", True):
             return None  # already running
     except Exception:
@@ -608,12 +549,11 @@ def _spawn_service_if_needed(client):
             print(f"[auto] launching dsp_service: {py} {cand}")
             proc = subprocess.Popen([py, cand], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             # wait up to ~6s for readiness
-            import time
             t0 = time.time()
             while time.time() - t0 < 6.0:
                 try:
-                    rep = client.quick_status_check()
-                    if isinstance(rep, dict):
+                    rep = client.get_status()
+                    if isinstance(rep, dict) and rep.get("ok", False):
                         print("[auto] dsp_service is ready")
                         return proc
                 except Exception:
@@ -639,32 +579,36 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    ui = Dsp2PlotUI(pub_addr=args.pub, rep_addr=args.rep)
-    # auto-start service if not running
+
+    # Create client first for auto-start check
+    temp_client = DspServiceClient(pub_addr=args.pub, rep_addr=args.rep)
+
+    # Auto-start service if not running
+    proc = None
     try:
-        proc = _spawn_service_if_needed(ui.client)
-        if proc is not None:
-            ui._svc_proc = proc
-    except Exception as _e:
-        print('[auto] spawn skipped:', _e)
+        proc = _spawn_service_if_needed(temp_client)
+    except Exception as e:
+        print('[auto] spawn skipped:', e)
+    finally:
+        temp_client.close()
+
+    # Create UI (will reconnect to service)
+    ui = Dsp2PlotUI(pub_addr=args.pub, rep_addr=args.rep, autostart=args.autostart)
+    if proc is not None:
+        ui._svc_proc = proc
 
     def _sig(_signum, _frame):
         try:
             ui.clean_exit(0)
         except SystemExit:
             pass
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, _sig)
         except Exception:
             pass
 
-    try:
-        print('[startup] start_acquire', ui.client.start_acquire())
-    except Exception as _e:
-        print('[startup] start_acquire skipped:', _e)
-    if args.autostart:
-        print(ui.client.start_acquire())
     plt.show()
 
 if __name__ == "__main__":
