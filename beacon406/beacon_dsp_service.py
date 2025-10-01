@@ -1269,6 +1269,8 @@ class BeaconDSPService:
                                     "backend_args": new_backend_args,
                                     "success": (self.backend is not None)
                                 })
+                                # Отправить обновлённый статус
+                                self._emit_status()
 
                             except Exception as e:
                                 log.error(f"Retune failed: {e}")
@@ -1276,6 +1278,8 @@ class BeaconDSPService:
                                     self._acq_state = AcqState.STOPPED
                                     self._in_flight_operation = False
                                 self._emit("retune_done", {"backend": new_backend_name, "success": False, "error": str(e)})
+                                # Отправить статус даже при ошибке
+                                self._emit_status()
 
                         # Запускаем в воркере
                         self._executor.submit(retune_task)
