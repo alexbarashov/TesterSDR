@@ -36,6 +36,8 @@ from dataclasses import dataclass, asdict
 from collections import deque
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 
 import numpy as np
 
@@ -94,12 +96,26 @@ CAPTURE_DIR         = ROOT / "captures"
 CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
 import logging
+import sys
+
+# Исправление кодировки для Windows
+if sys.platform == "win32":
+    import codecs
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, errors='replace')
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, errors='replace')
 
 setup_logging("DEBUG")
 log = init_logger(__name__)
 #log = get_logger(__name__)
 log.info("DSP service starting (root=%s)",
          logging.getLevelName(logging.getLogger().level))
+
+class AcqState(str, Enum):
+    """Состояния акквизиции"""
+    STOPPED = "stopped"
+    RUNNING = "running"
+    RETUNING = "retuning"
+    READY = "ready"
 
 @dataclass
 class Status:
@@ -335,9 +351,18 @@ class BeaconDSPService:
         self.pulse_queue: deque = deque(maxlen=8)
 
         # Потоки
-        self._stop = False
+        self._reader_stop = False  # Управляет только reader_loop
+        self._service_stop = False  # Управляет только REP/PUB сервисом
         self.reader_thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+        # RLock на случай вложенных вызовов (start/stop из-под локов и т.п.)
+        self._lock = threading.RLock()
+
+        # Воркер для тяжелых операций
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dsp_worker")
+
+        # Менеджмент состояния
+        self._acq_state = AcqState.READY
+        self._in_flight_operation = False  # Защита от дребезга
 
         # IPC
         self.ctx = zmq.Context.instance() if zmq else None
@@ -359,7 +384,13 @@ class BeaconDSPService:
 
         # Стартуем backend
         self._make_backend()
-        self.start()
+        # Автостарт только если backend успешно создан
+        if self.backend is not None:
+            self.start()
+        else:
+            # В режиме file_wait или если backend не создан - остаёмся в READY
+            with self._lock:
+                self._acq_state = AcqState.READY
 
     # ---------------- Backend ----------------
     def _make_backend(self):
@@ -434,18 +465,76 @@ class BeaconDSPService:
 
     # ---------------- Threads ----------------
     def start(self):
-        if self.reader_thread and self.reader_thread.is_alive():
-            return
-        self._stop = False
-        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader_thread.start()
+        """Idempotent start: запускает акквизицию если она еще не идет"""
+        with self._lock:
+            if self.reader_thread and self.reader_thread.is_alive():
+                # Уже запущено
+                if self._acq_state != AcqState.RUNNING:
+                    self._acq_state = AcqState.RUNNING
+                return
+            self._reader_stop = False
+            self._acq_state = AcqState.RUNNING
+            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
 
     def stop(self):
-        self._stop = True
-        if self.reader_thread:
-            self.reader_thread.join(timeout=1.0)
+        """Idempotent stop: останавливает акквизицию если она идет"""
+        # Проверяем состояние БЕЗ блокировки join
+        thread_to_stop = None
+        with self._lock:
+            if not self.reader_thread or not self.reader_thread.is_alive():
+                # Уже остановлено
+                self._acq_state = AcqState.STOPPED
+                return
+            self._reader_stop = True
+            self._acq_state = AcqState.STOPPED
+            thread_to_stop = self.reader_thread
+
+        # Join БЕЗ lock чтобы избежать deadlock
+        if thread_to_stop:
+            thread_to_stop.join(timeout=1.0)
+            if thread_to_stop.is_alive():
+                log.warning("Reader thread did not stop within timeout")
         if self.jsonl_fp:
             self.jsonl_fp.flush()
+
+    def shutdown(self):
+        """Корректное завершение всего сервиса (вызывается при KeyboardInterrupt)"""
+        log.info("Shutting down DSP service...")
+        with self._lock:
+            self._service_stop = True
+
+        # Останавливаем reader
+        try:
+            self.stop()
+        except Exception as e:
+            log.error(f"Error stopping reader: {e}")
+
+        # Закрываем ZMQ сокеты
+        try:
+            if self.rep:
+                self.rep.close(linger=0)
+            if self.pub:
+                self.pub.close(linger=0)
+            if self.ctx:
+                self.ctx.term()
+        except Exception as e:
+            log.error(f"Error closing ZMQ: {e}")
+
+        # Завершаем executor
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            log.error(f"Error shutting down executor: {e}")
+
+        # Закрываем JSONL
+        try:
+            if self.jsonl_fp:
+                self.jsonl_fp.close()
+        except Exception as e:
+            log.error(f"Error closing JSONL: {e}")
+
+        log.info("DSP service shutdown complete")
 
     # ---------------- Reader loop ----------------
     def _read_block(self, nsamps: int) -> np.ndarray:
@@ -467,7 +556,7 @@ class BeaconDSPService:
 
     def _reader_loop(self):
         last_stat = 0.0
-        while not self._stop:
+        while not self._reader_stop:
             try:
                 samples = self._read_block(READ_CHUNK)
                 if samples.size == 0:
@@ -521,6 +610,25 @@ class BeaconDSPService:
 
         # Добавляем поля t_s и last_rms_dbm для Sliding RMS
         payload = asdict(st)
+
+        # Добавляем новые поля согласно ТЗ
+        with self._lock:
+            backend_name = self.backend_name or "auto"
+            if self.backend is None:
+                backend_name = "file_wait"
+            elif hasattr(self.backend, 'backend_name'):
+                backend_name = self.backend.backend_name
+
+            backend_args_str = ""
+            if isinstance(self.backend_args, str):
+                backend_args_str = self.backend_args
+            elif isinstance(self.backend_args, dict) and "path" in self.backend_args:
+                backend_args_str = self.backend_args["path"]
+
+            payload["backend"] = backend_name
+            payload["backend_args"] = backend_args_str
+            payload["acq_state"] = str(self._acq_state.value)
+            payload["ready"] = (self.backend is not None and self._acq_state in (AcqState.READY, AcqState.RUNNING))
 
         with self._lock:
             if self.full_idx.size > 0 and self.full_rms.size > 0:
@@ -893,15 +1001,28 @@ class BeaconDSPService:
     # ---------------- REP server ----------------
     def _rep_loop(self):
         global PULSE_THRESH_DBM, RMS_WIN_MS, TARGET_SIGNAL_HZ
-        while not self._stop:
+        while not self._service_stop:
             try:
                 msg = self.rep.recv_json(flags=0)
             except Exception:
                 time.sleep(0.01)
                 continue
+
+            # Трекинг времени выполнения команды
+            t_start = time.time()
+            cmd = str(msg.get("cmd", "")).lower()
+
             try:
-                cmd = str(msg.get("cmd", "")).lower()
-                if cmd == "get_status":
+                # === МГНОВЕННЫЕ КОМАНДЫ (instant ACK) ===
+
+                if cmd == "echo":
+                    # Эхо для проверки канала
+                    payload = msg.get("payload", {})
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.debug(f"cmd=echo ack={ack_ms:.1f}ms")
+                    self.rep.send_json({"ok": True, "echo": payload})
+
+                elif cmd == "get_status":
                     # Готовим базовый Status
                     st = Status(
                         sdr=str(getattr(self.backend, "driver", "?")),
@@ -916,7 +1037,25 @@ class BeaconDSPService:
                     # Добавляем поля t_s и last_rms_dbm для Sliding RMS (как в _emit_status)
                     payload = asdict(st)
 
+                    # Добавляем новые поля согласно ТЗ
                     with self._lock:
+                        backend_name = self.backend_name or "auto"
+                        if self.backend is None:
+                            backend_name = "file_wait"
+                        elif hasattr(self.backend, 'backend_name'):
+                            backend_name = self.backend.backend_name
+
+                        backend_args_str = ""
+                        if isinstance(self.backend_args, str):
+                            backend_args_str = self.backend_args
+                        elif isinstance(self.backend_args, dict) and "path" in self.backend_args:
+                            backend_args_str = self.backend_args["path"]
+
+                        payload["backend"] = backend_name
+                        payload["backend_args"] = backend_args_str
+                        payload["acq_state"] = str(self._acq_state.value)
+                        payload["ready"] = (self.backend is not None and self._acq_state in (AcqState.READY, AcqState.RUNNING))
+
                         if self.full_idx.size > 0 and self.full_rms.size > 0:
                             # Даунсэмплинг до ≤1000 точек для веб-интерфейса
                             max_points = 1000
@@ -937,11 +1076,27 @@ class BeaconDSPService:
                             payload["t_s"] = []
                             payload["last_rms_dbm"] = []
 
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.debug(f"cmd=get_status ack={ack_ms:.1f}ms")
                     self.rep.send_json({"ok": True, "status": payload})
                 elif cmd == "start_acquire":
-                    self.start(); self.rep.send_json({"ok": True})
+                    # Idempotent start
+                    self.start()
+                    with self._lock:
+                        acq_state = str(self._acq_state.value)
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.debug(f"cmd=start_acquire ack={ack_ms:.1f}ms acq_state={acq_state}")
+                    self.rep.send_json({"ok": True, "acq_state": acq_state})
+
                 elif cmd == "stop_acquire":
-                    self.stop(); self.rep.send_json({"ok": True})
+                    # Idempotent stop
+                    self.stop()
+                    with self._lock:
+                        acq_state = str(self._acq_state.value)
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.debug(f"cmd=stop_acquire ack={ack_ms:.1f}ms acq_state={acq_state}")
+                    self.rep.send_json({"ok": True, "acq_state": acq_state})
+
                 elif cmd == "set_params":
                     # Позволяет менять базовые параметры на лету (минимальный набор)
                     changed = {}
@@ -949,44 +1104,60 @@ class BeaconDSPService:
                         PULSE_THRESH_DBM = float(msg["thresh_dbm"]); changed["thresh_dbm"] = PULSE_THRESH_DBM
                     if "target_signal_hz" in msg:
                         TARGET_SIGNAL_HZ = float(msg["target_signal_hz"]); changed["target_signal_hz"] = TARGET_SIGNAL_HZ
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.debug(f"cmd=set_params ack={ack_ms:.1f}ms changed={changed}")
                     self.rep.send_json({"ok": True, "changed": changed})
+
                 elif cmd == "get_last_pulse":
                     # Возвращаем последние данные pulse с фазой и частотой
                     if hasattr(self, 'last_pulse_data'):
+                        ack_ms = (time.time() - t_start) * 1000
+                        log.debug(f"cmd=get_last_pulse ack={ack_ms:.1f}ms")
                         self.rep.send_json({"ok": True, "pulse": self.last_pulse_data})
                     else:
+                        ack_ms = (time.time() - t_start) * 1000
+                        log.debug(f"cmd=get_last_pulse ack={ack_ms:.1f}ms error=no_data")
                         self.rep.send_json({"ok": False, "error": "No pulse data available"})
+
                 elif cmd == "save_sigmf":
-                    # Сохранение последнего сегмента в SigMF — заглушка (впиши свою функцию сохранения)
-                    # Здесь можно дернуть твой writer из lib.sigio, если он есть
+                    # Сохранение последнего сегмента в SigMF
                     fn = CAPTURE_DIR / time.strftime("pulse_%Y%m%d_%H%M%S.cf32")
                     seg = (self.last_iq_seg.copy() if isinstance(self.last_iq_seg, np.ndarray) else np.empty(0, np.complex64))
                     if seg.size:
-                        seg.astype(np.complex64).tofile(str(fn))
+                        # Мгновенный ACK, сохранение в воркере
+                        ack_ms = (time.time() - t_start) * 1000
+                        log.debug(f"cmd=save_sigmf ack={ack_ms:.1f}ms path={fn}")
                         self.rep.send_json({"ok": True, "path": str(fn)})
+                        # Асинхронное сохранение
+                        def save_task():
+                            seg.astype(np.complex64).tofile(str(fn))
+                            self._emit("file_saved", {"path": str(fn)})
+                        self._executor.submit(save_task)
                     else:
-                        self.rep.send_json({"ok": False, "err": "no_segment"})
+                        ack_ms = (time.time() - t_start) * 1000
+                        log.debug(f"cmd=save_sigmf ack={ack_ms:.1f}ms error=no_segment")
+                        self.rep.send_json({"ok": False, "error": "no_segment"})
                 elif cmd == "get_sdr_config":
                     # Возвращаем текущую конфигурацию SDR
-                    config = {
-                        "backend_name": self.backend_name if self.backend_name else "file",
-                        "center_freq_hz": self.backend.center_freq if (self.backend and hasattr(self.backend, 'center_freq')) else 406000000,
-                        "sample_rate_sps": self.sample_rate,
-                        "bb_shift_enable": self.effective_bb_shift_enable,
-                        "bb_shift_hz": self.effective_bb_shift_hz,
-                        "freq_corr_hz": 0,  # TODO: получить из backend
-                        "agc": False,  # TODO: получить из backend
-                        "gain_db": self.backend.gain if (self.backend and hasattr(self.backend, 'gain')) else 30.0,
-                        "bias_t": False,  # TODO: получить из backend
-                        "antenna": "RX",  # TODO: получить из backend
-                        "device": getattr(self.backend, 'device_info', 'Unknown device') if self.backend else "File wait mode"
-                    }
+                    with self._lock:
+                        config = {
+                            "backend_name": self.backend_name if self.backend_name else "file",
+                            "center_freq_hz": self.backend.center_freq if (self.backend and hasattr(self.backend, 'center_freq')) else 406000000,
+                            "sample_rate_sps": self.sample_rate,
+                            "bb_shift_enable": self.effective_bb_shift_enable,
+                            "bb_shift_hz": self.effective_bb_shift_hz,
+                            "freq_corr_hz": 0,  # TODO: получить из backend
+                            "agc": False,  # TODO: получить из backend
+                            "gain_db": self.backend.gain if (self.backend and hasattr(self.backend, 'gain')) else 30.0,
+                            "bias_t": False,  # TODO: получить из backend
+                            "antenna": "RX",  # TODO: получить из backend
+                            "device": getattr(self.backend, 'device_info', 'Unknown device') if self.backend else "File wait mode"
+                        }
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.debug(f"cmd=get_sdr_config ack={ack_ms:.1f}ms")
                     self.rep.send_json({"ok": True, "config": config})
                 elif cmd == "set_sdr_config":
-                    # Применение конфигурации SDR с поддержкой двух форматов:
-                    # 1. {"config": {...}} - из веб-клиента
-                    # 2. Плоские ключи - прямая совместимость
-
+                    # === МГНОВЕННЫЙ ACK, ТЯЖЕЛАЯ РАБОТА В ВОРКЕРЕ ===
                     # Определяем формат и извлекаем config
                     if "config" in msg:
                         config = msg["config"]
@@ -994,83 +1165,131 @@ class BeaconDSPService:
                         # Плоский формат - берем все ключи кроме служебных
                         config = {k: v for k, v in msg.items() if k not in ("cmd",)}
 
-                    applied = {}
-                    backend_changed = False
+                    # Проверка на дребезг (anti-spam)
+                    with self._lock:
+                        if self._in_flight_operation:
+                            ack_ms = (time.time() - t_start) * 1000
+                            log.debug(f"cmd=set_sdr_config ack={ack_ms:.1f}ms info=busy")
+                            self.rep.send_json({"ok": True, "info": "busy", "backend_changed": False, "retuned": False})
+                            continue
 
-                    try:
-                        # Проверяем нужно ли пересоздать backend
-                        old_backend_name = getattr(self.backend, 'backend_name', None) if self.backend else None
-                        old_backend_args = getattr(self.backend, 'backend_args', None) if self.backend else None
+                    # Быстрая проверка: нужно ли менять backend?
+                    old_backend_name = self.backend_name or "auto"
+                    old_backend_args = self.backend_args
 
-                        new_backend_name = config.get("backend_name", old_backend_name)
-                        new_backend_args = config.get("backend_args", old_backend_args)
+                    new_backend_name = config.get("backend_name", old_backend_name)
+                    new_backend_args = config.get("backend_args", old_backend_args)
 
-                        # Поддержка backend_args как строки (путь) или словаря {"path": "..."}
-                        if isinstance(new_backend_args, dict) and "path" in new_backend_args:
-                            new_backend_args = new_backend_args["path"]
+                    # Поддержка backend_args как строки (путь) или словаря {"path": "..."}
+                    if isinstance(new_backend_args, dict) and "path" in new_backend_args:
+                        new_backend_args = new_backend_args["path"]
 
-                        # Если backend_name или backend_args изменились - пересоздаем
-                        if (new_backend_name != old_backend_name or
-                            new_backend_args != old_backend_args):
-                            backend_changed = True
+                    backend_changed = (new_backend_name != old_backend_name or new_backend_args != old_backend_args)
 
-                            # Останавливаем текущий backend
-                            if self.backend:
-                                self.stop()
-                                if hasattr(self.backend, 'close'):
-                                    self.backend.close()
-                                self.backend = None
+                    # === МГНОВЕННЫЙ ACK ===
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.info(f"cmd=set_sdr_config ack={ack_ms:.1f}ms backend_changed={backend_changed}")
+                    self.rep.send_json({
+                        "ok": True,
+                        "backend_changed": backend_changed,
+                        "retuned": backend_changed
+                    })
 
-                            # Создаем новый backend
-                            if new_backend_name == "auto":
-                                actual_backend = select_auto_backend(new_backend_args)
-                            else:
-                                actual_backend = new_backend_name
+                    # Если backend меняется - запускаем тяжелую работу в воркере
+                    if backend_changed:
+                        with self._lock:
+                            self._in_flight_operation = True
+                            self._acq_state = AcqState.RETUNING
 
-                            self.backend = safe_make_backend(
-                                actual_backend,
-                                sample_rate=config.get("sample_rate_sps", SAMPLE_RATE_SPS),
-                                center_freq=config.get("center_freq_hz", CENTER_FREQ_HZ),
-                                gain_db=config.get("gain_db", TUNER_GAIN_DB),
-                                agc=ENABLE_AGC,
-                                corr_ppm=FREQ_CORR_PPM,
-                                device_args=new_backend_args,
-                                if_offset_hz=IF_OFFSET_HZ,
-                                on_fail="file_wait"
-                            )
+                        def retune_task():
+                            try:
+                                log.info(f"Retuning to backend={new_backend_name} args={new_backend_args}")
 
-                            # Обновить параметры сервиса от backend
-                            st = self.backend.get_status() or {}
-                            self.sample_rate = float(st.get("actual_sample_rate_sps",
-                                            getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS)))
-                            self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-                            self.nco_k = 2.0*np.pi*(BB_SHIFT_HZ/float(self.sample_rate))
-                            self.backend_name = new_backend_name
-                            self.backend_args = new_backend_args
+                                # Останавливаем текущий backend
+                                if self.backend:
+                                    self.stop()
+                                    if hasattr(self.backend, 'close'):
+                                        self.backend.close()
+                                    self.backend = None
 
-                            applied["backend_name"] = new_backend_name
-                            applied["backend_args"] = new_backend_args
+                                # Создаем новый backend
+                                if new_backend_name == "auto":
+                                    actual_backend = select_auto_backend(new_backend_args)
+                                else:
+                                    actual_backend = new_backend_name
 
-                            # Принудительно отключаем BB_SHIFT в файловом режиме
-                            if actual_backend == "file":
-                                self.effective_bb_shift_enable = False
-                                self.effective_bb_shift_hz = 0.0
-                                log.info("BB_SHIFT принудительно отключен в файловом режиме")
-                            else:
-                                self.effective_bb_shift_enable = config.get("bb_shift_enable", BB_SHIFT_ENABLE)
-                                self.effective_bb_shift_hz = config.get("bb_shift_hz", BB_SHIFT_HZ)
+                                self.backend = safe_make_backend(
+                                    actual_backend,
+                                    sample_rate=config.get("sample_rate_sps", SAMPLE_RATE_SPS),
+                                    center_freq=config.get("center_freq_hz", CENTER_FREQ_HZ),
+                                    gain_db=config.get("gain_db", TUNER_GAIN_DB),
+                                    agc=ENABLE_AGC,
+                                    corr_ppm=FREQ_CORR_PPM,
+                                    device_args=new_backend_args,
+                                    if_offset_hz=IF_OFFSET_HZ,
+                                    on_fail="file_wait"
+                                )
 
-                        # Применяем параметры которые можно изменить без перезапуска
-                        if "gain_db" in config and hasattr(self.backend, 'set_gain'):
-                            self.backend.set_gain(float(config["gain_db"]))
-                            applied["gain_db"] = float(config["gain_db"])
+                                # Обновить параметры сервиса от backend
+                                with self._lock:
+                                    st = self.backend.get_status() or {} if self.backend else {}
+                                    self.sample_rate = float(st.get("actual_sample_rate_sps",
+                                                    getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS)))
+                                    self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
+                                    self.nco_k = 2.0*np.pi*(BB_SHIFT_HZ/float(self.sample_rate))
+                                    self.backend_name = new_backend_name
+                                    self.backend_args = new_backend_args
 
-                        if "freq_corr_hz" in config and hasattr(self.backend, 'set_freq_correction'):
-                            self.backend.set_freq_correction(float(config["freq_corr_hz"]))
-                            applied["freq_corr_hz"] = float(config["freq_corr_hz"])
+                                    # Принудительно отключаем BB_SHIFT в файловом режиме
+                                    if actual_backend == "file":
+                                        self.effective_bb_shift_enable = False
+                                        self.effective_bb_shift_hz = 0.0
+                                        log.info("BB_SHIFT принудительно отключен в файловом режиме")
+                                    else:
+                                        self.effective_bb_shift_enable = config.get("bb_shift_enable", BB_SHIFT_ENABLE)
+                                        self.effective_bb_shift_hz = config.get("bb_shift_hz", BB_SHIFT_HZ)
 
-                        # BB_SHIFT параметры (если backend не менялся)
-                        if not backend_changed:
+                                    # Если backend успешно создан - переходим в ready
+                                    if self.backend:
+                                        self._acq_state = AcqState.READY
+                                        self._in_flight_operation = False
+
+                                # ВАЖНО: вызывать start() вне лока, чтобы исключить самозахват
+                                if self.backend:
+                                    self.start()
+                                else:
+                                    # Backend в режиме ожидания файла
+                                    with self._lock:
+                                        self._acq_state = AcqState.STOPPED
+                                        self._in_flight_operation = False
+
+                                # Уведомление о завершении ретюна
+                                self._emit("retune_done", {
+                                    "backend": actual_backend,
+                                    "backend_args": new_backend_args,
+                                    "success": (self.backend is not None)
+                                })
+
+                            except Exception as e:
+                                log.error(f"Retune failed: {e}")
+                                with self._lock:
+                                    self._acq_state = AcqState.STOPPED
+                                    self._in_flight_operation = False
+                                self._emit("retune_done", {"backend": new_backend_name, "success": False, "error": str(e)})
+
+                        # Запускаем в воркере
+                        self._executor.submit(retune_task)
+
+                    else:
+                        # Backend не меняется - применяем легкие параметры
+                        try:
+                            if "gain_db" in config and hasattr(self.backend, 'set_gain'):
+                                self.backend.set_gain(float(config["gain_db"]))
+
+                            if "freq_corr_hz" in config and hasattr(self.backend, 'set_freq_correction'):
+                                self.backend.set_freq_correction(float(config["freq_corr_hz"]))
+
+                            # BB_SHIFT параметры (если backend не менялся)
                             if "bb_shift_enable" in config:
                                 # Проверяем файловый режим
                                 if hasattr(self.backend, 'backend_name') and self.backend.backend_name == "file":
@@ -1079,45 +1298,27 @@ class BeaconDSPService:
                                     log.warning("BB_SHIFT принудительно отключен в файловом режиме")
                                 else:
                                     self.effective_bb_shift_enable = bool(config["bb_shift_enable"])
-                                applied["bb_shift_enable"] = self.effective_bb_shift_enable
 
                             if "bb_shift_hz" in config:
                                 if hasattr(self.backend, 'backend_name') and self.backend.backend_name == "file":
                                     self.effective_bb_shift_hz = 0.0
                                 else:
                                     self.effective_bb_shift_hz = float(config["bb_shift_hz"])
-                                applied["bb_shift_hz"] = self.effective_bb_shift_hz
 
-                        # Параметры требующие ретюна (в будущем)
-                        if "center_freq_hz" in config:
-                            applied["center_freq_hz"] = float(config["center_freq_hz"])
+                        except Exception as e:
+                            log.warning(f"Failed to apply light config params: {e}")
 
-                        if "sample_rate_sps" in config:
-                            applied["sample_rate_sps"] = float(config["sample_rate_sps"])
-
-                        # Пороги и другие параметры
-                        if "thresh_dbm" in config:
-                            self.pulse_thresh_dbm = float(config["thresh_dbm"])
-                            applied["thresh_dbm"] = self.pulse_thresh_dbm
-
-                        # Если backend изменился - автоматически запускаем
-                        if backend_changed and self.backend:
-                            self.start()
-
-                        self.rep.send_json({
-                            "ok": True,
-                            "applied": applied,
-                            "backend_changed": backend_changed,
-                            "retuned": backend_changed
-                        })
-
-                    except Exception as e:
-                        log.error(f"Ошибка применения SDR конфигурации: {e}")
-                        self.rep.send_json({"ok": False, "error": str(e)})
                 else:
-                    self.rep.send_json({"ok": False, "err": "unknown_cmd"})
+                    # Неизвестная команда
+                    ack_ms = (time.time() - t_start) * 1000
+                    log.warning(f"cmd={cmd} ack={ack_ms:.1f}ms error=unknown_cmd")
+                    self.rep.send_json({"ok": False, "error": "unknown_cmd"})
+
             except Exception as e:
-                self.rep.send_json({"ok": False, "err": str(e)})
+                # Любая ошибка в обработке - всегда отвечаем
+                ack_ms = (time.time() - t_start) * 1000
+                log.error(f"cmd={cmd} ack={ack_ms:.1f}ms error={e}")
+                self.rep.send_json({"ok": False, "error": str(e)})
 
 # -----------------------
 # CLI
@@ -1149,7 +1350,6 @@ if __name__ == "__main__":
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
-        log.info("Stopping DSP service...")
-        svc.stop()
-        log.info("Done")
+        log.info("Keyboard interrupt received")
+        svc.shutdown()
 
