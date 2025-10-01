@@ -1,0 +1,54 @@
+PS C:\Users\alexb\AppData\Local\Programs\Microsoft VS Code> & C:\Users\alexb\AppData\Local\Programs\Python\Python39\python.exe c:/work/TesterSDR/beacon406/beacon_dsp2plot.py
+[cmd=get_status] TIMEOUT after 2008.7 ms
+[auto] launching dsp_service: C:\Users\alexb\AppData\Local\Programs\Python\Python39\python.exe C:\work\TesterSDR\beacon406\beacon_dsp_service.py
+[cmd=get_status] ack=534.2 ms → OK
+[auto] dsp_service is ready
+[startup] Connecting to DSP service
+[startup] REP: tcp://127.0.0.1:8782
+[startup] PUB: tcp://127.0.0.1:8781
+[startup] Testing connection with echo...
+[cmd=echo] ack=16.9 ms → OK
+[startup] Getting initial status...
+[cmd=get_status] ack=1.0 ms → OK
+[startup] Initial status: backend=file_wait ready=False
+[cmd=get_status] ack=1.3 ms → OK
+[cmd=get_status] ack=0.9 ms → OK
+[cmd=get_status] ack=0.7 ms → OK
+[cmd=get_status] ack=0.8 ms → OK
+[cmd=get_status] ack=2.1 ms → OK
+[cmd=get_status] ack=1.6 ms → OK
+[cmd=get_status] ack=1.2 ms → OK
+[cmd=get_status] ack=0.6 ms → OK
+[cmd=get_status] ack=1.4 ms → OK
+[cmd=get_status] ack=0.9 ms → OK
+[cmd=get_status] ack=1.5 ms → OK
+[cmd=get_status] ack=1.1 ms → OK
+[cmd=get_status] ack=0.7 ms → OK
+[cmd=get_status] ack=0.7 ms → OK
+[cmd=get_status] ack=1.2 ms → OK
+[cmd=get_status] ack=0.7 ms → OK
+[cmd=get_status] ack=1.0 ms → OK
+[cmd=get_status] ack=1.0 ms → OK
+[cmd=get_status] ack=1.0 ms → OK
+[cmd=get_status] ack=1.5 ms → OK
+[cmd=get_status] ack=1.5 ms → OK
+[cmd=get_status] ack=1.5 ms → OK
+[cmd=get_status] ack=1.7 ms → OK
+[cmd=get_status] ack=1.2 ms → OK
+[cmd=get_status] TIMEOUT after 2011.4 ms
+[cmd=get_status] TIMEOUT after 2012.6 ms
+[backend_select] switching to file
+[cmd=set_sdr_config] TIMEOUT after 2032.6 ms
+[cmd=get_status] TIMEOUT after 2017.8 ms
+[cmd=get_status] TIMEOUT after 2013.3 ms
+[cmd=get_status] TIMEOUT after 2016.8 ms
+[cmd=get_status] TIMEOUT after 2011.7 ms
+[cmd=start_acquire] TIMEOUT after 2008.9 ms
+[cmd=get_status] TIMEOUT after 2007.8 ms
+[cmd=get_status] TIMEOUT after 2002.3 ms
+[cmd=get_status] TIMEOUT after 2003.8 ms
+[cmd=start_acquire] TIMEOUT after 2007.7 ms
+[cmd=get_status] TIMEOUT after 2008.1 ms
+[cmd=get_status] TIMEOUT after 2003.3 ms
+PS C:\Users\alexb\AppData\Local\Programs\Microsoft VS Code>
+ 
