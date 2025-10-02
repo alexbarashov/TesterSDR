@@ -594,6 +594,10 @@ class Dsp2PlotUI:
             rx = np.array(rms_data.get("x", []), dtype=np.float64)
             ry = np.array(rms_data.get("y", []), dtype=np.float64)
 
+            # Извлекаем core_gate из метаданных для обрезки графиков Phase и FM
+            core_gate = meta.get("core_gate")
+            fs = meta.get("fs", self.sample_rate)
+
             # Проверка валидности данных
             need_draw = False
 
@@ -610,8 +614,20 @@ class Dsp2PlotUI:
                         self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
                     need_draw = True
 
-            # Фаза график
+            # Фаза график - обрезаем по core_gate (только импульс)
             if px.size > 1 and py.size == px.size:
+                # Применяем обрезку по core_gate если доступен
+                if core_gate and len(core_gate) == 2:
+                    g0, g1 = core_gate
+                    # Переводим границы импульса из сэмплов в миллисекунды
+                    t0_ms = (g0 / fs) * 1000.0
+                    t1_ms = (g1 / fs) * 1000.0
+                    # Обрезаем данные фазы по времени импульса
+                    mask = (px >= t0_ms) & (px <= t1_ms)
+                    if np.any(mask):
+                        px = px[mask]
+                        py = py[mask]
+
                 self._phase_x = px
                 self._phase_y = py
                 self.ln_phase.set_data(px, py)
@@ -626,8 +642,20 @@ class Dsp2PlotUI:
                         self.ax_phase.set_ylim(ymin - margin, ymax + margin)
                     need_draw = True
 
-            # FM график
+            # FM график - обрезаем по core_gate (только импульс)
             if fx.size > 1 and fy.size == fx.size:
+                # Применяем обрезку по core_gate если доступен
+                if core_gate and len(core_gate) == 2:
+                    g0, g1 = core_gate
+                    # Переводим границы импульса из сэмплов в миллисекунды
+                    t0_ms = (g0 / fs) * 1000.0
+                    t1_ms = (g1 / fs) * 1000.0
+                    # Обрезаем данные FM по времени импульса
+                    mask = (fx >= t0_ms) & (fx <= t1_ms)
+                    if np.any(mask):
+                        fx = fx[mask]
+                        fy = fy[mask]
+
                 self._fm_x = fx
                 self._fm_y = fy
                 self.ln_fm.set_data(fx, fy)

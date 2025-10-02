@@ -1458,7 +1458,8 @@ class BeaconDSPService:
                                 "src_len": int(n_total),
                                 "out_len": int(len(phase_xs_out)),
                                 "units_req": units,
-                                "downsample": downsample_method if max_samples != "all" else "none"
+                                "downsample": downsample_method if max_samples != "all" else "none",
+                                "core_gate": list(self.last_core_gate) if self.last_core_gate else None
                             }
                         }
 
