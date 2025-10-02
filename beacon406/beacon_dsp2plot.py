@@ -385,6 +385,13 @@ class Dsp2PlotUI:
             if self._pulse_event_counter <= 3:
                 keys = sorted(obj.keys())
                 print(f"[pulse_event #{self._pulse_event_counter}] received keys: {keys}")
+                # Печатаем размеры массивов
+                px = obj.get("phase_xs_ms", [])
+                py = obj.get("phase_ys_rad", [])
+                fx = obj.get("fr_xs_ms", [])
+                fy = obj.get("fr_ys_hz", [])
+                rms = obj.get("rms_ms_dbm", [])
+                print(f"[pulse_event #{self._pulse_event_counter}] array sizes: phase_xs={len(px) if px else 0}, phase_ys={len(py) if py else 0}, fr_xs={len(fx) if fx else 0}, fr_ys={len(fy) if fy else 0}, rms={len(rms) if rms else 0}")
 
             # Собираем снимок данных (НЕ обновляем графики здесь!)
             snapshot = {
@@ -556,6 +563,11 @@ class Dsp2PlotUI:
 
         if snapshot is None:
             return  # Нет новых данных
+
+        # Диагностика: печатаем что пришло
+        px = snapshot.get("phase_xs_ms", [])
+        py = snapshot.get("phase_ys_rad", [])
+        print(f"[update_pulse_plots] Received snapshot: phase_xs={len(px) if px else 0}, phase_ys={len(py) if py else 0}, pulse_updates_enabled={self.pulse_updates_enabled}")
 
         # Сохраняем метрики для кнопок (всегда, даже если pulse_updates_enabled=False)
         try:
