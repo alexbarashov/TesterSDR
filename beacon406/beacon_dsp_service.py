@@ -702,6 +702,12 @@ class BeaconDSPService:
             start_pos = np.where(trans == 1)[0]
             end_pos = np.where(trans == -1)[0] - 1
 
+            # ВРЕМЕННАЯ ДИАГНОСТИКА
+            if rms_dbm_vec.size > 0:
+                max_rms = np.max(rms_dbm_vec)
+                if max_rms > -60:  # Печатаем только если есть сигнал
+                    log.info(f"[DEBUG] max_rms={max_rms:.1f} dBm, thresh={PULSE_THRESH_DBM} dBm, pulses_detected={len(start_pos)}")
+
             # Склейка OFF (anti-chop): если пауза < OFF_HANG_MS → объединяем
             hang_samps = int(round(self.sample_rate * (OFF_HANG_MS * 1e-3)))
             pairs: list[Tuple[int, int]] = []

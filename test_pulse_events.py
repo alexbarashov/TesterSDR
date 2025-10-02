@@ -3,9 +3,16 @@
 """
 Тестовый скрипт для проверки pulse событий от DSP сервиса
 """
+import sys
+import codecs
+
+# Исправляем кодировку для Windows консоли
+if sys.platform == "win32":
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, errors='replace')
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, errors='replace')
+
 import zmq
 import json
-import sys
 
 def main():
     pub_addr = "tcp://127.0.0.1:8781"
