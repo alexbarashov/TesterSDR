@@ -36,6 +36,7 @@ from matplotlib.widgets import Button
 from tkinter import filedialog
 import tkinter as tk
 import signal
+import queue
 
 # ZMQ
 try:
@@ -229,6 +230,10 @@ class Dsp2PlotUI:
         self.last_iq_seg: Optional[np.ndarray] = None
         self.last_core_gate: Optional[tuple] = None
 
+        # Очередь для потокобезопасной передачи pulse событий из SUB в главный поток
+        self._pulse_q: queue.Queue = queue.Queue(maxsize=2)
+        self._pulse_event_counter: int = 0  # Счётчик для диагностики
+
         # Клиент сервиса
         self.client = DspServiceClient(pub_addr=pub_addr, rep_addr=rep_addr)
         self._svc_proc = None
@@ -368,70 +373,63 @@ class Dsp2PlotUI:
 
     # ---------- Pulse events from SUB ----------
     def _on_pulse_event(self, obj: Dict[str, Any]):
-        """Обработка pulse/psk событий из PUB канала (в SUB потоке)."""
+        """
+        Обработка pulse/psk событий из PUB канала (в SUB потоке).
+        НЕ обновляет графики напрямую - складывает снимок в очередь для главного потока.
+        """
         typ = obj.get("type")
         if typ == "pulse":
-            # Сохраняем метрики для кнопок Параметры/Сообщение/Спектр
-            # (даже если pulse_updates_enabled = False)
-            try:
-                # Сохраняем IQ сегмент если есть
-                iq_seg = obj.get("iq_seg")
-                if iq_seg is not None and len(iq_seg) > 0:
-                    self.last_iq_seg = np.array(iq_seg, dtype=np.complex64)
+            self._pulse_event_counter += 1
 
-                # Сохраняем core gate
-                core_gate = obj.get("core_gate")
-                if core_gate is not None:
-                    self.last_core_gate = tuple(core_gate)
+            # Диагностика: печатаем ключи первых 3 событий
+            if self._pulse_event_counter <= 3:
+                keys = sorted(obj.keys())
+                print(f"[pulse_event #{self._pulse_event_counter}] received keys: {keys}")
 
-                # Сохраняем метрики фазы
-                metrics = obj.get("phase_metrics")
-                if metrics is not None:
-                    self.last_phase_metrics = metrics
+            # Собираем снимок данных (НЕ обновляем графики здесь!)
+            snapshot = {
+                "phase_xs_ms": obj.get("phase_xs_ms", []),
+                "phase_ys_rad": obj.get("phase_ys_rad", []),
+                "fr_xs_ms": obj.get("fr_xs_ms", []),
+                "fr_ys_hz": obj.get("fr_ys_hz", []),
+                "rms_ms_dbm": obj.get("rms_ms_dbm", []),
+                "iq_seg": obj.get("iq_seg"),
+                "core_gate": obj.get("core_gate"),
+                "phase_metrics": obj.get("phase_metrics"),
+                "msg_hex": obj.get("msg_hex"),
+            }
 
-                # Сохраняем HEX сообщение
-                msg_hex = obj.get("msg_hex")
-                if msg_hex is not None:
-                    self.last_msg_hex = str(msg_hex)
-            except Exception as e:
-                print(f"[pulse_event] Ошибка сохранения метрик: {e}")
+            # Валидация схемы
+            px = snapshot["phase_xs_ms"]
+            py = snapshot["phase_ys_rad"]
+            fx = snapshot["fr_xs_ms"]
+            fy = snapshot["fr_ys_hz"]
+            rms = snapshot["rms_ms_dbm"]
 
-            # Обновляем графики только если разрешено
-            if not self.pulse_updates_enabled:
+            valid = True
+            if px and py and len(px) != len(py):
+                print(f"[pulse_event] schema mismatch: len(phase_xs_ms)={len(px)} != len(phase_ys_rad)={len(py)}")
+                valid = False
+            if fx and fy and len(fx) != len(fy):
+                print(f"[pulse_event] schema mismatch: len(fr_xs_ms)={len(fx)} != len(fr_ys_hz)={len(fy)}")
+                valid = False
+            if px and rms and len(px) != len(rms):
+                print(f"[pulse_event] schema mismatch: len(phase_xs_ms)={len(px)} != len(rms_ms_dbm)={len(rms)}")
+                valid = False
+
+            if not valid:
                 return
 
-            # Pulse event - обновить графики Phase/FM/RMS
-            px = np.array(obj.get("phase_xs_ms", []), dtype=np.float64)
-            py = np.array(obj.get("phase_ys_rad", []), dtype=np.float64)
-            fx = np.array(obj.get("fr_xs_ms", []), dtype=np.float64)
-            fy = np.array(obj.get("fr_ys_hz", []), dtype=np.float64)
-            rms = np.array(obj.get("rms_ms_dbm", []), dtype=np.float64)
-
-            if px.size > 1 and rms.size == px.size:
-                self._pulse_rms_x = px
-                self._pulse_rms_y = rms
-                self.ln_pulse.set_data(px, rms)
-                self.ax_pulse.set_xlim(px.min(), px.max())
-                ymin, ymax = np.nanmin(rms), np.nanmax(rms)
-                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                    self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
-
-            if px.size > 1 and py.size == px.size:
-                self._phase_x = px
-                self._phase_y = py
-                self.ln_phase.set_data(px, py)
-                self.ax_phase.set_xlim(px.min(), px.max())
-
-            if fx.size > 1 and fy.size == fx.size:
-                self._fm_x = fx
-                self._fm_y = fy
-                self.ln_fm.set_data(fx, fy)
-                self.ax_fm.set_xlim(fx.min(), fx.max())
-                ymin, ymax = np.nanmin(fy), np.nanmax(fy)
-                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                    self.ax_fm.set_ylim(ymin - 50, ymax + 50)
-
-            self.fig2.canvas.draw_idle()
+            # Кладём снимок в очередь (очистив если полна)
+            try:
+                while self._pulse_q.full():
+                    try:
+                        self._pulse_q.get_nowait()
+                    except queue.Empty:
+                        break
+                self._pulse_q.put_nowait(snapshot)
+            except queue.Full:
+                pass  # Очередь заполнена, пропускаем
 
         elif typ == "psk":
             # PSK decoded message
@@ -450,6 +448,7 @@ class Dsp2PlotUI:
         2. Обновить status bar
         3. Обновить кнопки
         4. Обновить RMS график (Sliding RMS)
+        5. Извлечь последние pulse события из очереди и обновить графики второго окна
         """
         try:
             st_rep = self.client.get_status()
@@ -475,6 +474,10 @@ class Dsp2PlotUI:
 
             # Обновить RMS график (Sliding RMS)
             self._update_rms_plot(st)
+
+            # Обновить графики второго окна из очереди pulse событий
+            self._update_pulse_plots()
+
         except Exception as e:
             # Не падать при ошибках poll
             print(f"[poll_status] error: {e}")
@@ -537,6 +540,96 @@ class Dsp2PlotUI:
                     self.ln_thresh.set_data([], [])
 
             self.fig1.canvas.draw_idle()
+
+    def _update_pulse_plots(self):
+        """
+        Извлекает последнее pulse событие из очереди и обновляет графики второго окна.
+        Вызывается на главном потоке из _poll_status().
+        """
+        # Извлекаем последний снимок из очереди (пропуская старые)
+        snapshot = None
+        while True:
+            try:
+                snapshot = self._pulse_q.get_nowait()
+            except queue.Empty:
+                break
+
+        if snapshot is None:
+            return  # Нет новых данных
+
+        # Сохраняем метрики для кнопок (всегда, даже если pulse_updates_enabled=False)
+        try:
+            iq_seg = snapshot.get("iq_seg")
+            if iq_seg is not None and len(iq_seg) > 0:
+                self.last_iq_seg = np.array(iq_seg, dtype=np.complex64)
+
+            core_gate = snapshot.get("core_gate")
+            if core_gate is not None:
+                self.last_core_gate = tuple(core_gate)
+
+            metrics = snapshot.get("phase_metrics")
+            if metrics is not None:
+                self.last_phase_metrics = metrics
+
+            msg_hex = snapshot.get("msg_hex")
+            if msg_hex is not None:
+                self.last_msg_hex = str(msg_hex)
+        except Exception as e:
+            print(f"[update_pulse_plots] Ошибка сохранения метрик: {e}")
+
+        # Обновляем графики только если разрешено
+        if not self.pulse_updates_enabled:
+            return
+
+        # Извлекаем данные для графиков
+        px = np.array(snapshot.get("phase_xs_ms", []), dtype=np.float64)
+        py = np.array(snapshot.get("phase_ys_rad", []), dtype=np.float64)
+        fx = np.array(snapshot.get("fr_xs_ms", []), dtype=np.float64)
+        fy = np.array(snapshot.get("fr_ys_hz", []), dtype=np.float64)
+        rms = np.array(snapshot.get("rms_ms_dbm", []), dtype=np.float64)
+
+        # Проверка валидности данных
+        need_draw = False
+
+        # RMS график
+        if px.size > 1 and rms.size == px.size:
+            self._pulse_rms_x = px
+            self._pulse_rms_y = rms
+            self.ln_pulse.set_data(px, rms)
+            self.ax_pulse.set_xlim(px.min(), px.max())
+            ymin, ymax = np.nanmin(rms), np.nanmax(rms)
+            if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
+            need_draw = True
+        elif px.size > 0 or rms.size > 0:
+            print(f"[update_pulse_plots] skip RMS: len mismatch px={px.size} rms={rms.size}")
+
+        # Фаза график
+        if px.size > 1 and py.size == px.size:
+            self._phase_x = px
+            self._phase_y = py
+            self.ln_phase.set_data(px, py)
+            self.ax_phase.set_xlim(px.min(), px.max())
+            self.ax_phase.set_ylim(-1.5, +1.5)
+            need_draw = True
+        elif px.size > 0 or py.size > 0:
+            print(f"[update_pulse_plots] skip Phase: len mismatch px={px.size} py={py.size}")
+
+        # FM график
+        if fx.size > 1 and fy.size == fx.size:
+            self._fm_x = fx
+            self._fm_y = fy
+            self.ln_fm.set_data(fx, fy)
+            self.ax_fm.set_xlim(fx.min(), fx.max())
+            ymin, ymax = np.nanmin(fy), np.nanmax(fy)
+            if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                self.ax_fm.set_ylim(ymin - 50, ymax + 50)
+            need_draw = True
+        elif fx.size > 0 or fy.size > 0:
+            print(f"[update_pulse_plots] skip FM: len mismatch fx={fx.size} fy={fy.size}")
+
+        if need_draw:
+            self.fig2.canvas.draw_idle()
 
     def _can_send_command(self) -> bool:
         """Проверка анти-дребезга: разрешить команду если прошло >= debounce_ms."""
@@ -682,24 +775,116 @@ class Dsp2PlotUI:
             plt.show(block=False)
             plt.pause(0.1)
 
+    def _calculate_fallback_metrics(self):
+        """
+        Fallback-расчёт метрик из сохранённых данных графиков,
+        если phase_metrics недоступен от сервиса.
+        """
+        m = {}
+        try:
+            px = self._phase_x
+            py = self._phase_y
+            fx = self._fm_x
+            fy = self._fm_y
+            rms_y = self._pulse_rms_y
+
+            # Target Signal / Frequency Offset
+            m["Target Signal (Hz)"] = float('nan')
+            m["Frequency Offset (Hz)"] = float('nan')
+
+            # Message Duration
+            if px.size > 1:
+                m["Message Duration (ms)"] = float(px[-1] - px[0])
+            else:
+                m["Message Duration (ms)"] = float('nan')
+
+            # Carrier Duration (временно NaN - требуется edge detection)
+            m["Carrier Duration (ms)"] = float('nan')
+
+            # Pos/Neg: медианы по плато
+            if py.size > 0:
+                pos_mask = py > 0.6
+                neg_mask = py < -0.6
+                m["Pos (rad)"] = float(np.median(py[pos_mask])) if np.any(pos_mask) else float('nan')
+                m["Neg (rad)"] = float(np.median(py[neg_mask])) if np.any(neg_mask) else float('nan')
+            else:
+                m["Pos (rad)"] = float('nan')
+                m["Neg (rad)"] = float('nan')
+
+            # Rise/Fall: переходы -0.88 → +0.88 (упрощённо)
+            rise_us = float('nan')
+            fall_us = float('nan')
+            if py.size > 1 and px.size == py.size:
+                # Ищем первый переход снизу вверх через 0
+                for i in range(1, len(py)):
+                    if py[i-1] < -0.88 and py[i] > 0.88:
+                        rise_us = (px[i] - px[i-1]) * 1000  # ms to μs
+                        break
+                # Ищем первый переход сверху вниз
+                for i in range(1, len(py)):
+                    if py[i-1] > 0.88 and py[i] < -0.88:
+                        fall_us = (px[i] - px[i-1]) * 1000  # ms to μs
+                        break
+            m["Rise (μs)"] = rise_us
+            m["Fall (μs)"] = fall_us
+
+            # Asymmetry: упрощённая оценка
+            m["Asymmetry (%)"] = float('nan')
+
+            # Fmod: оценка по средней длительности полубита
+            fmod_hz = float('nan')
+            if py.size > 2 and px.size == py.size:
+                # Ищем переходы через 0
+                zero_crossings = []
+                for i in range(1, len(py)):
+                    if (py[i-1] < 0 and py[i] >= 0) or (py[i-1] > 0 and py[i] <= 0):
+                        # Интерполяция для точного времени
+                        t_cross = px[i-1] + (0 - py[i-1]) / (py[i] - py[i-1]) * (px[i] - px[i-1])
+                        zero_crossings.append(t_cross)
+                if len(zero_crossings) >= 2:
+                    # Средняя длительность полубита в мс
+                    intervals = np.diff(zero_crossings)
+                    mean_halfbit_ms = np.mean(intervals)
+                    if mean_halfbit_ms > 0:
+                        fmod_hz = 1000.0 / (2 * mean_halfbit_ms)  # Полный бит = 2 полубита
+            m["Fmod (Hz)"] = fmod_hz
+
+            # Power (RMS): медиана по массиву RMS
+            if rms_y.size > 0:
+                m["Power (RMS, dBm)"] = float(np.median(rms_y))
+            else:
+                m["Power (RMS, dBm)"] = float('nan')
+
+        except Exception as e:
+            print(f"[fallback_metrics] error: {e}")
+
+        return m
+
     def _on_show_params(self, _event):
         """Показывает таблицу параметров фазы."""
         m = self.last_phase_metrics
         hex_msg = self.last_msg_hex
+        is_approx = False
 
+        # Если метрики недоступны - пробуем fallback
         if not m:
-            fig, ax = plt.subplots(figsize=(8, 3))
-            try:
-                fig.canvas.manager.set_window_title("Phase Parameters")
-            except Exception:
-                pass
-            ax.axis('off')
-            ax.text(0.5, 0.5, "Нет параметров.\nСначала должен быть обнаружен PSK импульс.",
-                    ha='center', va='center', fontsize=12)
-            plt.tight_layout()
-            plt.show(block=False)
-            plt.pause(0.1)
-            return
+            # Проверяем, есть ли данные для fallback
+            if self._phase_x.size > 0 and self._phase_y.size > 0:
+                m = self._calculate_fallback_metrics()
+                is_approx = True
+            else:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                try:
+                    fig.canvas.manager.set_window_title("Phase Parameters")
+                except Exception:
+                    pass
+                ax.axis('off')
+                ax.text(0.5, 0.5, "Нет параметров.\nСначала должен быть обнаружен PSK импульс.",
+                        ha='center', va='center', fontsize=12)
+                plt.tight_layout()
+                plt.show(block=False)
+                plt.pause(0.1)
+                return
 
         headers = ["Parameter", "Value"]
         rows = [
@@ -738,7 +923,12 @@ class Dsp2PlotUI:
                     cell.set_facecolor('#f0f0f0')
                 cell.set_height(0.05)
 
-        fig.suptitle("Phase Parameters (snapshot)", fontsize=12, fontweight='bold')
+        title = "Phase Parameters"
+        if is_approx:
+            title += " (approx - calculated from graphs)"
+        else:
+            title += " (snapshot)"
+        fig.suptitle(title, fontsize=12, fontweight='bold')
         try:
             fig.canvas.manager.set_window_title("Phase Parameters")
         except Exception:
