@@ -222,6 +222,13 @@ class Dsp2PlotUI:
         self._fm_x: np.ndarray = np.array([], dtype=np.float64)
         self._fm_y: np.ndarray = np.array([], dtype=np.float64)
 
+        # Данные для второго окна (кнопки Параметры/Сообщение/Спектр)
+        self.pulse_updates_enabled: bool = True
+        self.last_phase_metrics: Optional[Dict[str, Any]] = None
+        self.last_msg_hex: Optional[str] = None
+        self.last_iq_seg: Optional[np.ndarray] = None
+        self.last_core_gate: Optional[tuple] = None
+
         # Клиент сервиса
         self.client = DspServiceClient(pub_addr=pub_addr, rep_addr=rep_addr)
         self._svc_proc = None
@@ -257,6 +264,9 @@ class Dsp2PlotUI:
         self.ax_lvl.set_xlabel("Время, с")
         self.ax_lvl.set_ylabel("RMS, dBm")
         self.ax_lvl.grid(True, alpha=0.3)
+
+        # Линия порога (пунктирная)
+        (self.ln_thresh,) = self.ax_lvl.plot([], [], linestyle='--', color='red', alpha=0.7, lw=1.5)
 
         # Status bar (title)
         self._update_status_bar()
@@ -312,14 +322,30 @@ class Dsp2PlotUI:
         self.fig2.subplots_adjust(hspace=0.5, top=0.92, bottom=0.15)
         self.fig2.suptitle("Импульс: RMS + Фаза + FM")
 
-        # Нижние кнопки
-        ax_button_save = self.fig2.add_axes([0.70, 0.01, 0.15, 0.06])
-        self.btn_save = Button(ax_button_save, "Save SigMF")
-        self.btn_save.on_clicked(self._on_save_sigmf)
+        # Нижние кнопки (по образцу beacon406_PSK_FM-plot.py)
+        ax_button_msg = self.fig2.add_axes([0.06, 0.01, 0.15, 0.06])
+        self.btn_msg = Button(ax_button_msg, "Сообщение")
+        self.btn_msg.on_clicked(self._on_show_message)
 
-        ax_button_exit2 = self.fig2.add_axes([0.86, 0.01, 0.12, 0.06])
-        self.btn_exit2 = Button(ax_button_exit2, "Выход")
-        self.btn_exit2.on_clicked(self._on_exit)
+        ax_button_stat = self.fig2.add_axes([0.22, 0.01, 0.15, 0.06])
+        self.btn_stat = Button(ax_button_stat, "Статус SDR")
+        self.btn_stat.on_clicked(self._on_show_sdr_status)
+
+        ax_button_params = self.fig2.add_axes([0.38, 0.01, 0.15, 0.06])
+        self.btn_params = Button(ax_button_params, "Параметры")
+        self.btn_params.on_clicked(self._on_show_params)
+
+        ax_button_spec = self.fig2.add_axes([0.54, 0.01, 0.15, 0.06])
+        self.btn_spec = Button(ax_button_spec, "Спектр")
+        self.btn_spec.on_clicked(self._on_show_spectrum)
+
+        ax_button_save = self.fig2.add_axes([0.70, 0.01, 0.15, 0.06])
+        self.btn_save = Button(ax_button_save, "Save IQ")
+        self.btn_save.on_clicked(self._on_save_iq)
+
+        ax_button_stop = self.fig2.add_axes([0.86, 0.01, 0.12, 0.06])
+        self.btn_stop = Button(ax_button_stop, "Стоп")
+        self.btn_stop.on_clicked(self._on_toggle_pulse_updates)
 
         # Single poll таймер (500ms для снижения нагрузки)
         self._timer = self.fig1.canvas.new_timer(interval=500)  # 500ms poll
@@ -345,6 +371,35 @@ class Dsp2PlotUI:
         """Обработка pulse/psk событий из PUB канала (в SUB потоке)."""
         typ = obj.get("type")
         if typ == "pulse":
+            # Сохраняем метрики для кнопок Параметры/Сообщение/Спектр
+            # (даже если pulse_updates_enabled = False)
+            try:
+                # Сохраняем IQ сегмент если есть
+                iq_seg = obj.get("iq_seg")
+                if iq_seg is not None and len(iq_seg) > 0:
+                    self.last_iq_seg = np.array(iq_seg, dtype=np.complex64)
+
+                # Сохраняем core gate
+                core_gate = obj.get("core_gate")
+                if core_gate is not None:
+                    self.last_core_gate = tuple(core_gate)
+
+                # Сохраняем метрики фазы
+                metrics = obj.get("phase_metrics")
+                if metrics is not None:
+                    self.last_phase_metrics = metrics
+
+                # Сохраняем HEX сообщение
+                msg_hex = obj.get("msg_hex")
+                if msg_hex is not None:
+                    self.last_msg_hex = str(msg_hex)
+            except Exception as e:
+                print(f"[pulse_event] Ошибка сохранения метрик: {e}")
+
+            # Обновляем графики только если разрешено
+            if not self.pulse_updates_enabled:
+                return
+
             # Pulse event - обновить графики Phase/FM/RMS
             px = np.array(obj.get("phase_xs_ms", []), dtype=np.float64)
             py = np.array(obj.get("phase_ys_rad", []), dtype=np.float64)
@@ -380,7 +435,12 @@ class Dsp2PlotUI:
 
         elif typ == "psk":
             # PSK decoded message
-            pass  # Можно добавить обработку декодированных сообщений
+            try:
+                msg_hex = obj.get("msg_hex")
+                if msg_hex is not None:
+                    self.last_msg_hex = str(msg_hex)
+            except Exception:
+                pass
 
     # ---------- Single poll loop ----------
     def _poll_status(self):
@@ -457,15 +517,25 @@ class Dsp2PlotUI:
         """Обновить RMS график (Sliding RMS) из get_status."""
         t_s = st.get("t_s", [])
         last_rms_dbm = st.get("last_rms_dbm", [])
+        thresh_dbm = st.get("thresh_dbm")
+
         if t_s and last_rms_dbm:
             self._lvl_x = np.array(t_s, dtype=np.float64)
             self._lvl_y = np.array(last_rms_dbm, dtype=np.float64)
             self.ln_lvl.set_data(self._lvl_x, self._lvl_y)
             if self._lvl_x.size > 1:
-                self.ax_lvl.set_xlim(self._lvl_x[0], self._lvl_x[-1])
+                x_min, x_max = self._lvl_x[0], self._lvl_x[-1]
+                self.ax_lvl.set_xlim(x_min, x_max)
                 ymin, ymax = np.nanmin(self._lvl_y), np.nanmax(self._lvl_y)
                 if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
                     self.ax_lvl.set_ylim(ymin - 2, ymax + 2)
+
+                # Обновить линию порога
+                if thresh_dbm is not None and np.isfinite(thresh_dbm):
+                    self.ln_thresh.set_data([x_min, x_max], [thresh_dbm, thresh_dbm])
+                else:
+                    self.ln_thresh.set_data([], [])
+
             self.fig1.canvas.draw_idle()
 
     def _can_send_command(self) -> bool:
@@ -520,6 +590,387 @@ class Dsp2PlotUI:
         print(f"[backend_select] switching to {backend_name}")
         self.client.set_sdr_config(**cfg)
         # Не ждать долго — poll_status покажет retuning → ready
+
+    def _on_toggle_pulse_updates(self, _event):
+        """Переключение обновлений второго окна (Стоп/Старт)."""
+        self.pulse_updates_enabled = not self.pulse_updates_enabled
+        try:
+            self.btn_stop.label.set_text("Старт" if not self.pulse_updates_enabled else "Стоп")
+        except Exception:
+            pass
+        state = "включено" if self.pulse_updates_enabled else "выключено"
+        print(f"[pulse_window] Обновления второго окна: {state}")
+
+    def _on_show_message(self, _event):
+        """Показывает декодированное сообщение EPIRB/ELT в отдельном окне."""
+        hex_msg = self.last_msg_hex
+        if not hex_msg or hex_msg == "None":
+            fig, ax = plt.subplots(figsize=(8, 3))
+            try:
+                fig.canvas.manager.set_window_title("Декодированное сообщение")
+            except Exception:
+                pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, "Нет сообщения для декодирования.\nСначала должен быть обнаружен PSK импульс.",
+                    ha='center', va='center', fontsize=12)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
+            return
+
+        try:
+            # Импортируем модули декодирования
+            import sys
+            from pathlib import Path
+            beacon_lib = Path(__file__).parent / "lib"
+            if str(beacon_lib) not in sys.path:
+                sys.path.insert(0, str(beacon_lib))
+            from hex_decoder import hex_to_bits, build_table_rows
+
+            bits = hex_to_bits(hex_msg)
+            if len(bits) != 144:
+                bits = (bits + [0]*144)[:144]
+
+            headers = ["Binary Range", "Binary Content", "Field Name", "Decoded Value"]
+            rows = build_table_rows(bits)
+
+            fig, ax = plt.subplots(figsize=(14, 8))
+            ax.axis('off')
+            fig.suptitle(f"EPIRB/ELT Beacon Parameters Decoder\nHEX: {hex_msg}",
+                        fontsize=11, fontweight='bold')
+
+            tbl = ax.table(cellText=[headers] + rows, loc='center', cellLoc='left',
+                          colWidths=[0.12, 0.25, 0.28, 0.35])
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(8)
+
+            for i in range(len(headers)):
+                cell = tbl[(0, i)]
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+                cell.set_height(0.05)
+
+            for i in range(1, len(rows) + 1):
+                for j in range(len(headers)):
+                    cell = tbl[(i, j)]
+                    if i % 2 == 0:
+                        cell.set_facecolor('#f0f0f0')
+                    cell.set_height(0.04)
+                    if j == 2:
+                        field_name = rows[i-1][2].lower()
+                        if any(key in field_name for key in ['country', 'mmsi', 'lat', 'lon', 'id']):
+                            cell.set_facecolor('#e8f4ff')
+
+            try:
+                fig.canvas.manager.set_window_title("EPIRB/ELT Beacon Decoder")
+            except Exception:
+                pass
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
+
+        except Exception as e:
+            fig, ax = plt.subplots(figsize=(8, 3))
+            try:
+                fig.canvas.manager.set_window_title("Ошибка декодирования")
+            except Exception:
+                pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, f"Ошибка декодирования сообщения:\n{str(e)}\n\nHEX: {hex_msg}",
+                    ha='center', va='center', fontsize=10)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
+
+    def _on_show_params(self, _event):
+        """Показывает таблицу параметров фазы."""
+        m = self.last_phase_metrics
+        hex_msg = self.last_msg_hex
+
+        if not m:
+            fig, ax = plt.subplots(figsize=(8, 3))
+            try:
+                fig.canvas.manager.set_window_title("Phase Parameters")
+            except Exception:
+                pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, "Нет параметров.\nСначала должен быть обнаружен PSK импульс.",
+                    ha='center', va='center', fontsize=12)
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
+            return
+
+        headers = ["Parameter", "Value"]
+        rows = [
+            ["Target Signal (Hz)", f"{m.get('Target Signal (Hz)', float('nan')):.3f}"],
+            ["Frequency Offset (Hz)", f"{m.get('Frequency Offset (Hz)', float('nan')):.3f}"],
+            ["Message Duration (ms)", f"{m.get('Message Duration (ms)', float('nan')):.3f}"],
+            ["Carrier Duration (ms)", f"{m.get('Carrier Duration (ms)', float('nan')):.3f}"],
+            ["Pos (rad)", f"{m.get('Pos (rad)', float('nan')):.3f}"],
+            ["Neg (rad)", f"{m.get('Neg (rad)', float('nan')):.3f}"],
+            ["Rise (μs)", f"{m.get('Rise (μs)', float('nan')):.1f}"],
+            ["Fall (μs)", f"{m.get('Fall (μs)', float('nan')):.1f}"],
+            ["Asymmetry (%)", f"{m.get('Asymmetry (%)', float('nan')):.3f}"],
+            ["Fmod (Hz)", f"{m.get('Fmod (Hz)', float('nan')):.3f}"],
+            ["Power (RMS, dBm)", f"{m.get('Power (RMS, dBm)', float('nan')):.2f}"],
+            ["HEX", str(hex_msg) if hex_msg is not None else ""]
+        ]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.axis('off')
+
+        tbl = ax.table(cellText=[headers] + rows, loc='center', cellLoc='left',
+                      colWidths=[0.5, 0.5])
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(10)
+
+        for i in range(len(headers)):
+            cell = tbl[(0, i)]
+            cell.set_facecolor('#4CAF50')
+            cell.set_text_props(weight='bold', color='white')
+            cell.set_height(0.06)
+
+        for i in range(1, len(rows) + 1):
+            for j in range(len(headers)):
+                cell = tbl[(i, j)]
+                if i % 2 == 0:
+                    cell.set_facecolor('#f0f0f0')
+                cell.set_height(0.05)
+
+        fig.suptitle("Phase Parameters (snapshot)", fontsize=12, fontweight='bold')
+        try:
+            fig.canvas.manager.set_window_title("Phase Parameters")
+        except Exception:
+            pass
+        plt.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.1)
+
+    def _on_show_sdr_status(self, _event):
+        """Показывает таблицу статуса SDR."""
+        st = self.last_status
+        if not st:
+            fig, ax = plt.subplots(figsize=(6, 2))
+            try:
+                fig.canvas.manager.set_window_title("SDR Status")
+            except Exception:
+                pass
+            ax.axis('off')
+            ax.text(0.5, 0.5, "Нет данных статуса.\nПодключитесь к DSP сервису.",
+                    ha='center', va='center')
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
+            return
+
+        preferred = [
+            "backend", "driver", "requested_sample_rate_sps", "actual_sample_rate_sps",
+            "requested_center_freq_hz", "actual_center_freq_hz", "bandwidth_hz",
+            "hw_sample_rate_sps", "decim", "agc_on", "overall_gain_db", "stage_gains_db",
+            "corr_ppm", "calib_offset_db", "file_path", "if_offset_hz", "mix_shift_hz", "eof",
+            "device_info", "ref_level_dbm", "acq_state", "ready", "fs", "bb_shift_hz", "thresh_dbm"
+        ]
+        keys, seen = [], set()
+        for k in preferred:
+            if k in st and k not in seen:
+                keys.append(k)
+                seen.add(k)
+        for k in sorted(st.keys()):
+            if k not in seen:
+                keys.append(k)
+                seen.add(k)
+
+        headers = ["Key", "Value"]
+        rows = []
+        for k in keys:
+            v = st.get(k, "")
+            if k == "stage_gains_db" and isinstance(v, dict):
+                try:
+                    v = ", ".join(f"{kk}={vv}" for kk, vv in v.items())
+                except Exception:
+                    v = str(v)
+            rows.append([str(k), str(v)])
+
+        if not rows:
+            rows = [["status", "нет данных"]]
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.axis('off')
+
+        tbl = ax.table(cellText=[headers] + rows, loc='center', cellLoc='left',
+                      colWidths=[0.4, 0.6])
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(10)
+
+        for i in range(len(headers)):
+            cell = tbl[(0, i)]
+            cell.set_facecolor('#4CAF50')
+            cell.set_text_props(weight='bold', color='white')
+            cell.set_height(0.05)
+
+        for i in range(1, len(rows) + 1):
+            for j in range(len(headers)):
+                cell = tbl[(i, j)]
+                if i % 2 == 0:
+                    cell.set_facecolor('#f0f0f0')
+                cell.set_height(0.04)
+                if j == 0:
+                    key_name = rows[i-1][0].lower()
+                    if any(word in key_name for word in ['actual', 'file_path', 'backend', 'driver']):
+                        cell.set_facecolor('#e8f4ff')
+
+        fig.suptitle("SDR Status (snapshot)", fontsize=12, fontweight='bold')
+        try:
+            fig.canvas.manager.set_window_title("SDR Status")
+        except Exception:
+            pass
+        plt.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.1)
+
+    def _on_show_spectrum(self, _event):
+        """Показывает спектр ядра импульса."""
+        seg = self.last_iq_seg
+        gate = self.last_core_gate
+        if seg is None or seg.size < 8:
+            print("[spectrum] Нет сегмента для построения спектра. Сначала должен быть обнаружен импульс.")
+            return
+        if not gate or gate[1] - gate[0] < 8:
+            print("[spectrum] Нет валидного ядра импульса (gate). Спектр не построен.")
+            return
+
+        self._plot_fft_sector(
+            seg, FFT_N=65536, avg=4, window="hann",
+            sector_center_hz=0.0, sector_half_width_hz=50_000,
+            y_ref_db=0.0, gate_samples=gate, remove_dc=True,
+            normalize="dBc", y_lim=None, show_mask=True
+        )
+
+    def _plot_fft_sector(self, iq_data, FFT_N=65536, avg=4, window="hann",
+                         sector_center_hz=0.0, sector_half_width_hz=50_000,
+                         y_ref_db=0.0, *, gate_samples=None, remove_dc=True,
+                         normalize="dBc", y_lim=None, show_mask=True):
+        """Рисует сектор спектра с маской C/S T.001."""
+        SR = float(self.sample_rate)
+        seg = np.asarray(iq_data, dtype=np.complex64)
+
+        if gate_samples is not None:
+            i0, i1 = map(int, gate_samples)
+            i0 = max(0, i0)
+            i1 = min(len(seg), i1)
+            seg = seg[i0:i1]
+
+        if seg.size < 16:
+            print("[spectrum] Сегмент слишком короткий для FFT")
+            return
+
+        if remove_dc:
+            seg = seg - np.mean(seg)
+
+        win = (np.hanning(FFT_N) if window == "hann" else np.ones(FFT_N)).astype(np.float32)
+
+        n_possible = seg.size // FFT_N
+        if n_possible == 0:
+            seg = np.pad(seg, (0, FFT_N - seg.size))
+            n_possible = 1
+        n_blocks = int(max(1, min(int(avg), n_possible)))
+
+        psd_acc = None
+        w2 = float(np.sum(win ** 2))
+        for k in range(n_blocks):
+            chunk = seg[k*FFT_N:(k+1)*FFT_N]
+            if chunk.size < FFT_N:
+                chunk = np.pad(chunk, (0, FFT_N - chunk.size))
+            X = np.fft.fftshift(np.fft.fft(chunk * win, n=FFT_N))
+            mag2 = (np.abs(X) ** 2) / w2
+            psd_acc = mag2 if psd_acc is None else (psd_acc + mag2)
+
+        psd = psd_acc / n_blocks
+        psd_db = 10.0 * np.log10(psd + 1e-30) + y_ref_db
+
+        f_axis = np.fft.fftshift(np.fft.fftfreq(FFT_N, d=1.0 / SR))
+
+        f0 = float(sector_center_hz)
+        hw = abs(float(sector_half_width_hz))
+        mask = (f_axis >= f0 - hw) & (f_axis <= f0 + hw)
+        if not np.any(mask):
+            print("[spectrum] Сектор вне диапазона частотной оси.")
+            return
+
+        f_sec = f_axis[mask]
+        psd_sec_db = psd_db[mask]
+
+        i_pk = int(np.argmax(psd_sec_db))
+        f_pk = float(f_sec[i_pk])
+        p_pk_abs_db = float(psd_sec_db[i_pk])
+
+        if str(normalize).lower() == "dbc":
+            psd_plot = psd_sec_db - p_pk_abs_db
+            ylabel = "Амплитуда, dBc"
+            p_pk_dBc = 0.0
+            mask_offset = 0.0
+        else:
+            psd_plot = psd_sec_db
+            ylabel = "Амплитуда, dB"
+            p_pk_dBc = float(p_pk_abs_db - p_pk_abs_db)
+            mask_offset = p_pk_abs_db
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(f_sec / 1e3, psd_plot, lw=1.5, label="Спектр")
+        ax.axvline(0.0, linestyle='--', alpha=0.5)
+
+        def _plot_cs_t001_mask(ax, p0, half_width_hz):
+            segments = [
+                (0.0, 3e3, 0.0), (3e3, 7e3, -20.0), (7e3, 12e3, -30.0),
+                (12e3, 24e3, -35.0), (24e3, half_width_hz, -40.0),
+            ]
+            for sgn in (-1.0, +1.0):
+                for f1, f2, lvl in segments:
+                    x1 = sgn * (f1 / 1e3)
+                    x2 = sgn * (f2 / 1e3)
+                    y = p0 + lvl
+                    ax.plot([x1, x2], [y, y], linestyle='--', linewidth=1.2, alpha=0.9)
+            for fb in [3e3, 7e3, 12e3, 24e3]:
+                ax.axvline(+fb/1e3, linestyle=':', alpha=0.6)
+                ax.axvline(-fb/1e3, linestyle=':', alpha=0.6)
+
+        if show_mask:
+            _plot_cs_t001_mask(ax, mask_offset, hw)
+
+        ax.plot([f_pk / 1e3], [0.0 if normalize.lower() == "dbc" else p_pk_abs_db], 'o', label="Пик")
+        ax.set_title("FFT сектор (статичный, без IF-сдвигов)")
+        ax.set_xlabel("Частота, кГц (baseband)")
+        ax.set_ylabel(ylabel)
+        if y_lim is not None:
+            ax.set_ylim(*y_lim)
+        ax.grid(True, alpha=0.5)
+        ax.legend(loc="best")
+
+        fig.suptitle(
+            f"Fs: {SR/1000:.1f} kSPS, сектор центр={sector_center_hz/1000:.3f} кГц, ±{sector_half_width_hz/1000:.1f} кГц",
+            fontsize=14, fontweight='bold'
+        )
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+        plt.show(block=False)
+        plt.pause(0.1)
+
+    def _on_save_iq(self, _event):
+        """Сохраняет последний IQ сегмент импульса в CF32."""
+        if not self._can_send_command():
+            return
+        data = self.last_iq_seg
+        if data is None or data.size == 0:
+            print("[save_iq] Нет данных для сохранения. Сначала должен быть обнаружен импульс.")
+            return
+
+        import time
+        from pathlib import Path
+        root = Path(__file__).parent.parent / "captures"
+        root.mkdir(exist_ok=True)
+        fname = root / time.strftime("iq_pulse_%Y%m%d_%H%M%S.cf32")
+        data.astype(np.complex64).tofile(str(fname))
+        print(f"[save_iq] Pulse IQ сохранён: {fname} ({data.size} samples)")
 
     def _on_save_sigmf(self, _event):
         if not self._can_send_command():
