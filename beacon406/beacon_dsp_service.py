@@ -759,8 +759,12 @@ class BeaconDSPService:
                 duration_samps = max(1, found_end - start_abs + 1)
                 dur_ms = 1000.0 * duration_samps / float(self.sample_rate)
 
+                # ВРЕМЕННАЯ ДИАГНОСТИКА
+                log.info(f"[DEBUG] Pulse detected: dur={dur_ms:.1f} ms, min_required={MIN_PULSE_MS_FOR_PSK} ms")
+
                 # Фильтр длительности
                 if dur_ms < MIN_PULSE_MS_FOR_PSK:
+                    log.info(f"[DEBUG] Pulse REJECTED: too short ({dur_ms:.1f} ms < {MIN_PULSE_MS_FOR_PSK} ms)")
                     continue
 
                 # Статистика надпороговых
@@ -944,7 +948,8 @@ class BeaconDSPService:
                         markers_ms = [float(edge / FSd * 1e3) for edge in edges[:100]]  # Ограничиваем количество
 
                     # Подготавливаем RMS данные для графика
-                    rms_ms_dbm = None
+                    rms_xs_ms = None
+                    rms_ys_dbm = None
                     if phase_xs_down is not None:
                         try:
                             # Получаем RMS данные для времени импульса
@@ -958,7 +963,8 @@ class BeaconDSPService:
 
                                     # Даунсэмплинг RMS до ≤1000 точек как и для фазы
                                     rms_xs_down, rms_ys_down = downsample_data(pulse_t_ms, pulse_rms_values)
-                                    rms_ms_dbm = rms_ys_down
+                                    rms_xs_ms = rms_xs_down
+                                    rms_ys_dbm = rms_ys_down
                         except Exception as e:
                             log.debug(f"Failed to extract RMS data for pulse: {e}")
 
@@ -967,7 +973,8 @@ class BeaconDSPService:
                     pulse_event_data["phase_ys_rad"] = phase_ys_down
                     pulse_event_data["fr_xs_ms"] = fr_xs_ms
                     pulse_event_data["fr_ys_hz"] = fr_ys_hz
-                    pulse_event_data["rms_ms_dbm"] = rms_ms_dbm
+                    pulse_event_data["rms_xs_ms"] = rms_xs_ms
+                    pulse_event_data["rms_ys_dbm"] = rms_ys_dbm
                     pulse_event_data["markers_ms"] = markers_ms
                     pulse_event_data["preamble_ms"] = [0, float(carrier_ms)] if carrier_ms == carrier_ms else None
                     pulse_event_data["baud"] = float(baud) if baud == baud else None
@@ -995,6 +1002,7 @@ class BeaconDSPService:
 
                     # Отправляем обогащенное pulse событие
                     self._emit("pulse", pulse_event_data)
+                    log.info(f"[DEBUG] Pulse event SENT: keys={sorted(pulse_event_data.keys())}, phase_xs_len={len(pulse_event_data.get('phase_xs_ms', []))}, phase_ys_len={len(pulse_event_data.get('phase_ys_rad', []))}")
 
                     # Отправляем PSK событие
                     self._emit("psk", asdict(PSKEvent(
@@ -1012,7 +1020,7 @@ class BeaconDSPService:
                     )))
 
                 except Exception as e:
-                    log.info(f"PSK демодуляция пропущена: {e}")
+                    log.error(f"[DEBUG] PSK демодуляция FAILED: {e}", exc_info=True)
                     # Отправляем базовое pulse событие без данных фазы
                     self._emit("pulse", pulse_event_data)
 

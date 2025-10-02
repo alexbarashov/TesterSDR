@@ -23,7 +23,8 @@
       "Bash(chcp:*)",
       "Bash(timeout 30 python test_file_selection_en.py)",
       "Bash(git add:*)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(C:UsersalexbAppDataLocalProgramsPythonPython39python.exe test_pulse_events.py)"
     ],
     "deny": [],
     "ask": []

@@ -24,6 +24,15 @@ if sys.platform == "win32":
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, errors='replace')
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, errors='replace')
 
+# DIAGNOSTIC: File logging
+_diag_log = open("C:/work/TesterSDR/dsp2plot_debug.log", "w", encoding="utf-8", buffering=1)
+def dlog(msg):
+    _diag_log.write(f"{msg}\n")
+    _diag_log.flush()
+    print(msg, flush=True)
+
+dlog("[STARTUP] beacon_dsp2plot.py starting")
+
 # UI
 import numpy as np
 import matplotlib
@@ -71,6 +80,7 @@ class DspServiceClient:
         self.sub = self.ctx.socket(zmq.SUB)
         self.sub.connect(self.pub_addr)
         self.sub.setsockopt_string(zmq.SUBSCRIBE, "")
+        dlog(f"[DspServiceClient] SUB socket connected to {self.pub_addr}")
         self._sub_thread = None
         self._cb = None
 
@@ -161,15 +171,19 @@ class DspServiceClient:
     # ---- SUB stream ----
     def subscribe_events(self, callback):
         """Подписка на pulse/psk события из PUB канала."""
+        dlog(f"[subscribe_events] Starting SUB thread")
         self._cb = callback
         if self._sub_thread and self._sub_thread.is_alive():
+            dlog(f"[subscribe_events] SUB thread already running")
             return
         self._stop = False
         self._sub_thread = threading.Thread(target=self._sub_loop, daemon=True)
         self._sub_thread.start()
+        dlog(f"[subscribe_events] SUB thread started")
 
     def _sub_loop(self):
         """SUB loop для приёма pulse/psk событий."""
+        dlog("[SUB loop] Started")
         poller = zmq.Poller()
         poller.register(self.sub, zmq.POLLIN)
         while not self._stop:
@@ -178,10 +192,12 @@ class DspServiceClient:
                 try:
                     line = self.sub.recv_string(flags=zmq.NOBLOCK)
                     obj = json.loads(line)
+                    typ = obj.get("type", "?")
+                    dlog(f"[SUB loop] Received event: type={typ}")
                     if self._cb:
                         self._cb(obj)
-                except Exception:
-                    pass
+                except Exception as e:
+                    dlog(f"[SUB loop] ERROR: {e}")
 
     def close(self):
         self._stop = True
@@ -399,19 +415,21 @@ class Dsp2PlotUI:
                 "phase_ys_rad": obj.get("phase_ys_rad", []),
                 "fr_xs_ms": obj.get("fr_xs_ms", []),
                 "fr_ys_hz": obj.get("fr_ys_hz", []),
-                "rms_ms_dbm": obj.get("rms_ms_dbm", []),
+                "rms_xs_ms": obj.get("rms_xs_ms", []),
+                "rms_ys_dbm": obj.get("rms_ys_dbm", []),
                 "iq_seg": obj.get("iq_seg"),
                 "core_gate": obj.get("core_gate"),
                 "phase_metrics": obj.get("phase_metrics"),
                 "msg_hex": obj.get("msg_hex"),
             }
 
-            # Валидация схемы
+            # Валидация схемы (только X/Y пары должны совпадать)
             px = snapshot["phase_xs_ms"]
             py = snapshot["phase_ys_rad"]
             fx = snapshot["fr_xs_ms"]
             fy = snapshot["fr_ys_hz"]
-            rms = snapshot["rms_ms_dbm"]
+            rx = snapshot["rms_xs_ms"]
+            ry = snapshot["rms_ys_dbm"]
 
             valid = True
             if px and py and len(px) != len(py):
@@ -420,8 +438,8 @@ class Dsp2PlotUI:
             if fx and fy and len(fx) != len(fy):
                 print(f"[pulse_event] schema mismatch: len(fr_xs_ms)={len(fx)} != len(fr_ys_hz)={len(fy)}")
                 valid = False
-            if px and rms and len(px) != len(rms):
-                print(f"[pulse_event] schema mismatch: len(phase_xs_ms)={len(px)} != len(rms_ms_dbm)={len(rms)}")
+            if rx and ry and len(rx) != len(ry):
+                print(f"[pulse_event] schema mismatch: len(rms_xs_ms)={len(rx)} != len(rms_ys_dbm)={len(ry)}")
                 valid = False
 
             if not valid:
@@ -602,23 +620,24 @@ class Dsp2PlotUI:
         py = np.array(snapshot.get("phase_ys_rad", []), dtype=np.float64)
         fx = np.array(snapshot.get("fr_xs_ms", []), dtype=np.float64)
         fy = np.array(snapshot.get("fr_ys_hz", []), dtype=np.float64)
-        rms = np.array(snapshot.get("rms_ms_dbm", []), dtype=np.float64)
+        rx = np.array(snapshot.get("rms_xs_ms", []), dtype=np.float64)
+        ry = np.array(snapshot.get("rms_ys_dbm", []), dtype=np.float64)
 
         # Проверка валидности данных
         need_draw = False
 
         # RMS график
-        if px.size > 1 and rms.size == px.size:
-            self._pulse_rms_x = px
-            self._pulse_rms_y = rms
-            self.ln_pulse.set_data(px, rms)
-            self.ax_pulse.set_xlim(px.min(), px.max())
-            ymin, ymax = np.nanmin(rms), np.nanmax(rms)
+        if rx.size > 1 and ry.size == rx.size:
+            self._pulse_rms_x = rx
+            self._pulse_rms_y = ry
+            self.ln_pulse.set_data(rx, ry)
+            self.ax_pulse.set_xlim(rx.min(), rx.max())
+            ymin, ymax = np.nanmin(ry), np.nanmax(ry)
             if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
                 self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
             need_draw = True
-        elif px.size > 0 or rms.size > 0:
-            print(f"[update_pulse_plots] skip RMS: len mismatch px={px.size} rms={rms.size}")
+        elif rx.size > 0 or ry.size > 0:
+            print(f"[update_pulse_plots] skip RMS: len mismatch rx={rx.size} ry={ry.size}")
 
         # Фаза график
         if px.size > 1 and py.size == px.size:
