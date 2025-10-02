@@ -90,9 +90,9 @@ class DspServiceClient:
             pass
 
         self.req = self.ctx.socket(zmq.REQ)
-        # Короткий таймаут для мгновенного ACK
+        # Таймауты: get_last_pulse может занять до 3-4 секунд из-за обработки данных
         try:
-            self.req.setsockopt(zmq.RCVTIMEO, 2000)  # 2s для ACK
+            self.req.setsockopt(zmq.RCVTIMEO, 5000)  # 5s для get_last_pulse
             self.req.setsockopt(zmq.SNDTIMEO, 1000)  # 1s send
             self.req.setsockopt(zmq.LINGER, 0)
         except Exception:
@@ -250,6 +250,8 @@ class Dsp2PlotUI:
         self._pulse_q: queue.Queue = queue.Queue(maxsize=2)
         self._pulse_event_counter: int = 0  # Счётчик для диагностики
         self._new_pulse_available: bool = False  # Флаг нового pulse для get_last_pulse запроса
+        self._last_pulse_request_time: float = 0.0  # Время последнего запроса get_last_pulse
+        self._pulse_request_interval_s: float = 1.0  # Минимальный интервал между запросами (секунды)
 
         # Клиент сервиса
         self.client = DspServiceClient(pub_addr=pub_addr, rep_addr=rep_addr)
@@ -535,14 +537,31 @@ class Dsp2PlotUI:
 
     def _update_pulse_plots(self):
         """
-        Запрашивает данные импульса через get_last_pulse при получении нового pulse события.
+        Запрашивает данные импульса через get_last_pulse при получении нового pulse события
+        или периодически для файлового режима.
         Вызывается на главном потоке из _poll_status().
         """
-        # Проверяем флаг нового pulse события
-        if not self._new_pulse_available:
+        # Проверяем флаг нового pulse события ИЛИ файловый режим с запущенным acquire
+        st = self.last_status
+        backend = st.get("backend", "")
+        acq_state = st.get("acq_state", "")
+
+        # В файловом режиме запрашиваем данные если есть пустые графики и acquire запущен
+        force_request = False
+        if "file" in backend.lower() and acq_state == "running":
+            if self._phase_x.size == 0:  # графики еще не загружены
+                force_request = True
+
+        if not self._new_pulse_available and not force_request:
+            return
+
+        # Ограничиваем частоту запросов (не чаще раза в N секунд)
+        now = time.time()
+        if now - self._last_pulse_request_time < self._pulse_request_interval_s:
             return
 
         self._new_pulse_available = False
+        self._last_pulse_request_time = now
 
         # Обновляем графики только если разрешено
         if not self.pulse_updates_enabled:
@@ -557,7 +576,7 @@ class Dsp2PlotUI:
             )
 
             if not rep.get("ok", False):
-                print(f"[get_last_pulse] error: {rep.get('error', 'unknown')}")
+                # Ошибка получения данных (например, "No pulse data available")
                 return
 
             # Извлекаем данные из ответа (структура: {"ok": True, "pulse": {...}})
@@ -599,7 +618,12 @@ class Dsp2PlotUI:
                 xmin, xmax = px.min(), px.max()
                 if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
                     self.ax_phase.set_xlim(xmin, xmax)
-                    self.ax_phase.set_ylim(-1.5, +1.5)
+                    # Автомасштабирование по данным (с запасом)
+                    ymin, ymax = np.nanmin(py), np.nanmax(py)
+                    if np.isfinite(ymin) and np.isfinite(ymax):
+                        y_range = ymax - ymin
+                        margin = max(0.2, y_range * 0.1)  # минимум 0.2 рад запаса
+                        self.ax_phase.set_ylim(ymin - margin, ymax + margin)
                     need_draw = True
 
             # FM график
@@ -617,7 +641,6 @@ class Dsp2PlotUI:
 
             if need_draw:
                 self.fig2.canvas.draw_idle()
-                print(f"[get_last_pulse] updated plots: t_unit={t_unit}, meta={meta}")
 
         except Exception as e:
             print(f"[get_last_pulse] exception: {e}")
