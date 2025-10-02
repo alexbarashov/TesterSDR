@@ -969,21 +969,12 @@ class BeaconDSPService:
                     # Добавляем данные для кнопок UI (Параметры/Сообщение/Спектр)
                     pulse_event_data["phase_metrics"] = self.last_phase_metrics
                     pulse_event_data["msg_hex"] = self.last_msg_hex
-                    # IQ сегмент импульса (для кнопки Спектр)
-                    try:
-                        iq_segment = iq[win_start:win_end]
-                        if iq_segment.size > 0:
-                            # Конвертируем в список для JSON сериализации
-                            pulse_event_data["iq_seg"] = iq_segment.tolist()
-                            # Core gate: индексы ядра импульса относительно начала сегмента
-                            core_start = max(0, start_abs - win_start)
-                            core_end = min(iq_segment.size, found_end - win_start)
-                            pulse_event_data["core_gate"] = [int(core_start), int(core_end)]
-                        else:
-                            pulse_event_data["iq_seg"] = None
-                            pulse_event_data["core_gate"] = None
-                    except Exception as e:
-                        log.debug(f"Failed to extract IQ segment: {e}")
+                    # IQ сегмент импульса и core gate (уже сохранены в self.last_iq_seg и self.last_core_gate)
+                    if self.last_iq_seg is not None and self.last_iq_seg.size > 0:
+                        # Конвертируем в список для JSON сериализации
+                        pulse_event_data["iq_seg"] = self.last_iq_seg.tolist()
+                        pulse_event_data["core_gate"] = list(self.last_core_gate) if self.last_core_gate else None
+                    else:
                         pulse_event_data["iq_seg"] = None
                         pulse_event_data["core_gate"] = None
 
