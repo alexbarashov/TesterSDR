@@ -158,6 +158,22 @@ class DspServiceClient:
     def set_params(self, **params) -> Dict[str, Any]:
         return self.send_cmd("set_params", **params)
 
+    def get_last_pulse(self, slice_params=None, max_samples="all", downsample="decimate") -> Dict[str, Any]:
+        """
+        Запрос последних данных импульса с поддержкой среза.
+        slice_params: {"offset": value, "span": value, "units": "samples"|"time"|"%"|"auto"}
+        max_samples: "all" или int
+        downsample: "decimate" или "minmax"
+        """
+        kwargs = {}
+        if slice_params is not None:
+            kwargs["slice"] = slice_params
+        if max_samples != "all":
+            kwargs["max_samples"] = max_samples
+        if downsample != "decimate":
+            kwargs["downsample"] = downsample
+        return self.send_cmd("get_last_pulse", **kwargs)
+
     # ---- SUB stream ----
     def subscribe_events(self, callback):
         """Подписка на pulse/psk события из PUB канала."""
@@ -233,6 +249,7 @@ class Dsp2PlotUI:
         # Очередь для потокобезопасной передачи pulse событий из SUB в главный поток
         self._pulse_q: queue.Queue = queue.Queue(maxsize=2)
         self._pulse_event_counter: int = 0  # Счётчик для диагностики
+        self._new_pulse_available: bool = False  # Флаг нового pulse для get_last_pulse запроса
 
         # Клиент сервиса
         self.client = DspServiceClient(pub_addr=pub_addr, rep_addr=rep_addr)
@@ -375,56 +392,36 @@ class Dsp2PlotUI:
     def _on_pulse_event(self, obj: Dict[str, Any]):
         """
         Обработка pulse/psk событий из PUB канала (в SUB потоке).
-        НЕ обновляет графики напрямую - складывает снимок в очередь для главного потока.
+        Устанавливает флаг для запроса данных через get_last_pulse из главного потока.
         """
         typ = obj.get("type")
         if typ == "pulse":
             self._pulse_event_counter += 1
+            # Сигнализируем главному потоку о новом pulse (для запроса get_last_pulse)
+            self._new_pulse_available = True
 
-            # Собираем снимок данных (НЕ обновляем графики здесь!)
-            snapshot = {
-                "phase_xs_ms": obj.get("phase_xs_ms", []),
-                "phase_ys_rad": obj.get("phase_ys_rad", []),
-                "fr_xs_ms": obj.get("fr_xs_ms", []),
-                "fr_ys_hz": obj.get("fr_ys_hz", []),
-                "rms_xs_ms": obj.get("rms_xs_ms", []),
-                "rms_ys_dbm": obj.get("rms_ys_dbm", []),
-                "iq_seg": obj.get("iq_seg"),
-                "core_gate": obj.get("core_gate"),
-                "phase_metrics": obj.get("phase_metrics"),
-                "msg_hex": obj.get("msg_hex"),
-            }
-
-            # Валидация схемы (только X/Y пары должны совпадать)
-            px = snapshot["phase_xs_ms"]
-            py = snapshot["phase_ys_rad"]
-            fx = snapshot["fr_xs_ms"]
-            fy = snapshot["fr_ys_hz"]
-            rx = snapshot["rms_xs_ms"]
-            ry = snapshot["rms_ys_dbm"]
-
-            # Проверка согласованности X/Y пар
-            valid = True
-            if px and py and len(px) != len(py):
-                valid = False
-            if fx and fy and len(fx) != len(fy):
-                valid = False
-            if rx and ry and len(rx) != len(ry):
-                valid = False
-
-            if not valid:
-                return
-
-            # Кладём снимок в очередь (очистив если полна)
+            # Сохраняем метаданные (iq_seg, core_gate, metrics, msg_hex) из события
             try:
-                while self._pulse_q.full():
-                    try:
-                        self._pulse_q.get_nowait()
-                    except queue.Empty:
-                        break
-                self._pulse_q.put_nowait(snapshot)
-            except queue.Full:
-                pass  # Очередь заполнена, пропускаем
+                iq_seg = obj.get("iq_seg")
+                if iq_seg is not None and len(iq_seg) > 0:
+                    # IQ приходит как чередующиеся [r0, i0, r1, i1, ...]
+                    iq_real = iq_seg[0::2]
+                    iq_imag = iq_seg[1::2]
+                    self.last_iq_seg = np.array(iq_real, dtype=np.float32) + 1j * np.array(iq_imag, dtype=np.float32)
+
+                core_gate = obj.get("core_gate")
+                if core_gate is not None:
+                    self.last_core_gate = tuple(core_gate)
+
+                metrics = obj.get("phase_metrics")
+                if metrics is not None:
+                    self.last_phase_metrics = metrics
+
+                msg_hex = obj.get("msg_hex")
+                if msg_hex is not None:
+                    self.last_msg_hex = str(msg_hex)
+            except Exception:
+                pass
 
         elif typ == "psk":
             # PSK decoded message
@@ -538,94 +535,86 @@ class Dsp2PlotUI:
 
     def _update_pulse_plots(self):
         """
-        Извлекает последнее pulse событие из очереди и обновляет графики второго окна.
+        Запрашивает данные импульса через get_last_pulse при получении нового pulse события.
         Вызывается на главном потоке из _poll_status().
         """
-        # Извлекаем последний снимок из очереди (пропуская старые)
-        snapshot = None
-        while True:
-            try:
-                snapshot = self._pulse_q.get_nowait()
-            except queue.Empty:
-                break
+        # Проверяем флаг нового pulse события
+        if not self._new_pulse_available:
+            return
 
-        if snapshot is None:
-            return  # Нет новых данных
-
-        # Сохраняем метрики для кнопок (всегда, даже если pulse_updates_enabled=False)
-        try:
-            iq_seg = snapshot.get("iq_seg")
-            if iq_seg is not None and len(iq_seg) > 0:
-                # IQ приходит как чередующиеся [r0, i0, r1, i1, ...]
-                # Конвертируем в complex массив
-                iq_real = iq_seg[0::2]  # Четные индексы - real
-                iq_imag = iq_seg[1::2]  # Нечетные индексы - imag
-                self.last_iq_seg = np.array(iq_real, dtype=np.float32) + 1j * np.array(iq_imag, dtype=np.float32)
-
-            core_gate = snapshot.get("core_gate")
-            if core_gate is not None:
-                self.last_core_gate = tuple(core_gate)
-
-            metrics = snapshot.get("phase_metrics")
-            if metrics is not None:
-                self.last_phase_metrics = metrics
-
-            msg_hex = snapshot.get("msg_hex")
-            if msg_hex is not None:
-                self.last_msg_hex = str(msg_hex)
-        except Exception:
-            pass
+        self._new_pulse_available = False
 
         # Обновляем графики только если разрешено
         if not self.pulse_updates_enabled:
             return
 
-        # Извлекаем данные для графиков
-        px = np.array(snapshot.get("phase_xs_ms", []), dtype=np.float64)
-        py = np.array(snapshot.get("phase_ys_rad", []), dtype=np.float64)
-        fx = np.array(snapshot.get("fr_xs_ms", []), dtype=np.float64)
-        fy = np.array(snapshot.get("fr_ys_hz", []), dtype=np.float64)
-        rx = np.array(snapshot.get("rms_xs_ms", []), dtype=np.float64)
-        ry = np.array(snapshot.get("rms_ys_dbm", []), dtype=np.float64)
+        # Запрашиваем данные через get_last_pulse с дефолтными параметрами (0% / 100% / all)
+        try:
+            rep = self.client.get_last_pulse(
+                slice_params={"offset": "0%", "span": "100%", "units": "%"},
+                max_samples="all",
+                downsample="decimate"
+            )
 
-        # Проверка валидности данных
-        need_draw = False
+            if not rep.get("ok", False):
+                print(f"[get_last_pulse] error: {rep.get('error', 'unknown')}")
+                return
 
-        # RMS график
-        if rx.size > 1 and ry.size == rx.size:
-            self._pulse_rms_x = rx
-            self._pulse_rms_y = ry
-            self.ln_pulse.set_data(rx, ry)
-            self.ax_pulse.set_xlim(rx.min(), rx.max())
-            ymin, ymax = np.nanmin(ry), np.nanmax(ry)
-            if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
-            need_draw = True
+            # Извлекаем данные из ответа (структура: {"ok": True, "pulse": {...}})
+            pulse_data = rep.get("pulse", {})
+            t_unit = pulse_data.get("t_unit", "ms")
+            phase_data = pulse_data.get("phase", {})
+            fm_data = pulse_data.get("fm", {})
+            rms_data = pulse_data.get("rms", {})
+            meta = pulse_data.get("meta", {})
 
-        # Фаза график
-        if px.size > 1 and py.size == px.size:
-            self._phase_x = px
-            self._phase_y = py
-            self.ln_phase.set_data(px, py)
-            self.ax_phase.set_xlim(px.min(), px.max())
-            self.ax_phase.set_ylim(-1.5, +1.5)
-            need_draw = True
+            px = np.array(phase_data.get("x", []), dtype=np.float64)
+            py = np.array(phase_data.get("y", []), dtype=np.float64)
+            fx = np.array(fm_data.get("x", []), dtype=np.float64)
+            fy = np.array(fm_data.get("y", []), dtype=np.float64)
+            rx = np.array(rms_data.get("x", []), dtype=np.float64)
+            ry = np.array(rms_data.get("y", []), dtype=np.float64)
 
-        # FM график
-        if fx.size > 1 and fy.size == fx.size:
-            self._fm_x = fx
-            self._fm_y = fy
-            self.ln_fm.set_data(fx, fy)
-            self.ax_fm.set_xlim(fx.min(), fx.max())
-            ymin, ymax = np.nanmin(fy), np.nanmax(fy)
-            if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                self.ax_fm.set_ylim(ymin - 50, ymax + 50)
-            need_draw = True
-        elif fx.size > 0 or fy.size > 0:
-            print(f"[update_pulse_plots] skip FM: len mismatch fx={fx.size} fy={fy.size}")
+            # Проверка валидности данных
+            need_draw = False
 
-        if need_draw:
-            self.fig2.canvas.draw_idle()
+            # RMS график
+            if rx.size > 1 and ry.size == rx.size:
+                self._pulse_rms_x = rx
+                self._pulse_rms_y = ry
+                self.ln_pulse.set_data(rx, ry)
+                self.ax_pulse.set_xlim(rx.min(), rx.max())
+                ymin, ymax = np.nanmin(ry), np.nanmax(ry)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
+                need_draw = True
+
+            # Фаза график
+            if px.size > 1 and py.size == px.size:
+                self._phase_x = px
+                self._phase_y = py
+                self.ln_phase.set_data(px, py)
+                self.ax_phase.set_xlim(px.min(), px.max())
+                self.ax_phase.set_ylim(-1.5, +1.5)
+                need_draw = True
+
+            # FM график
+            if fx.size > 1 and fy.size == fx.size:
+                self._fm_x = fx
+                self._fm_y = fy
+                self.ln_fm.set_data(fx, fy)
+                self.ax_fm.set_xlim(fx.min(), fx.max())
+                ymin, ymax = np.nanmin(fy), np.nanmax(fy)
+                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                    self.ax_fm.set_ylim(ymin - 50, ymax + 50)
+                need_draw = True
+
+            if need_draw:
+                self.fig2.canvas.draw_idle()
+                print(f"[get_last_pulse] updated plots: t_unit={t_unit}, meta={meta}")
+
+        except Exception as e:
+            print(f"[get_last_pulse] exception: {e}")
 
     def _can_send_command(self) -> bool:
         """Проверка анти-дребезга: разрешить команду если прошло >= debounce_ms."""

@@ -305,6 +305,203 @@ def select_auto_backend(file_path: Optional[str] = None) -> str:
     raise RuntimeError("No SDR found and no file provided")
 
 
+# ============================================================================
+# Утилиты для slice API (offset/span с поддержкой units)
+# ============================================================================
+
+def normalize_slice(
+    offset: Any,
+    span: Any,
+    units: str,
+    fs: float,
+    n_total: int
+) -> Tuple[int, int]:
+    """
+    Конвертирует offset/span в абсолютные индексы сэмплов.
+
+    Parameters
+    ----------
+    offset : int | float | str
+        Начало среза. Может быть:
+        - int: индекс в сэмплах (если units="samples")
+        - str: "123", "10ms", "500us", "50%"
+    span : int | float | str
+        Длина среза (аналогично offset)
+    units : str
+        "samples" | "time" | "%" | "auto"
+    fs : float
+        Частота дискретизации (Sa/s)
+    n_total : int
+        Общая длина данных в сэмплах
+
+    Returns
+    -------
+    (i0, i1) : Tuple[int, int]
+        Индексы начала и конца (i1 не включается)
+        Гарантируется: 0 <= i0 < i1 <= n_total
+    """
+
+    def parse_value(val: Any, unit_mode: str) -> int:
+        """Парсинг одного значения offset или span в сэмплы."""
+        # Если уже int
+        if isinstance(val, int):
+            return val
+
+        # Если float - округляем
+        if isinstance(val, float):
+            return int(round(val))
+
+        # Если строка
+        if isinstance(val, str):
+            val = val.strip()
+
+            # Проценты
+            if val.endswith('%'):
+                percent = float(val[:-1])
+                return int(round(percent / 100.0 * n_total))
+
+            # Время с суффиксом
+            if val.endswith('us'):
+                t_us = float(val[:-2])
+                return int(round(t_us * 1e-6 * fs))
+            if val.endswith('ms'):
+                t_ms = float(val[:-2])
+                return int(round(t_ms * 1e-3 * fs))
+            if val.endswith('s'):
+                t_s = float(val[:-1])
+                return int(round(t_s * fs))
+
+            # Без суффикса
+            try:
+                num = float(val)
+                # Если units="auto" и нет суффикса -> сэмплы
+                # Если units="samples" -> сэмплы
+                # Если units="time" -> секунды
+                # Если units="%" -> проценты
+                if unit_mode in ("auto", "samples"):
+                    return int(round(num))
+                elif unit_mode == "time":
+                    # По умолчанию секунды
+                    return int(round(num * fs))
+                elif unit_mode == "%":
+                    return int(round(num / 100.0 * n_total))
+                else:
+                    return int(round(num))
+            except ValueError:
+                raise ValueError(f"Cannot parse value: {val}")
+
+        raise TypeError(f"Unsupported type for slice value: {type(val)}")
+
+    # Парсим offset и span
+    offset_samp = parse_value(offset, units)
+    span_samp = parse_value(span, units)
+
+    # Минимальный span = 2
+    if span_samp < 2:
+        span_samp = 2
+
+    # Вычисляем i0, i1
+    i0 = offset_samp
+    i1 = i0 + span_samp
+
+    # Обрезка к допустимым границам
+    # Разрешаем отрицательный offset (преролл), но обрезаем к [0, n_total]
+    if i0 < 0:
+        i0 = 0
+    if i0 >= n_total:
+        i0 = n_total - 1
+
+    if i1 > n_total:
+        i1 = n_total
+    if i1 <= i0:
+        i1 = i0 + 1
+
+    return (i0, i1)
+
+
+def apply_downsample(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_samples: int | str,
+    method: str = "decimate"
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Даунсэмплинг данных до max_samples точек.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Массив X координат
+    y : np.ndarray
+        Массив Y значений
+    max_samples : int | "all"
+        Максимальное количество точек. "all" = без ограничений
+    method : str
+        "decimate" - равномерная прорежка
+        "minmax" - бакетизация с сохранением min/max пиков
+
+    Returns
+    -------
+    (x_out, y_out) : Tuple[np.ndarray, np.ndarray]
+        Даунсэмплированные массивы
+    """
+    if max_samples == "all" or len(x) <= max_samples:
+        return x, y
+
+    n = len(x)
+    max_samples = int(max_samples)
+
+    if method == "decimate":
+        # Равномерная прорежка
+        step = n / max_samples
+        indices = np.floor(np.arange(max_samples) * step).astype(int)
+        indices = np.clip(indices, 0, n - 1)
+        return x[indices], y[indices]
+
+    elif method == "minmax":
+        # Бакетизация с сохранением пиков
+        # На каждый бакет выдаём 2 точки (min, max)
+        n_buckets = max_samples // 2
+        if n_buckets < 1:
+            n_buckets = 1
+
+        bucket_size = n / n_buckets
+        x_out = []
+        y_out = []
+
+        for i in range(n_buckets):
+            i0 = int(np.floor(i * bucket_size))
+            i1 = int(np.floor((i + 1) * bucket_size))
+            if i1 > n:
+                i1 = n
+            if i1 <= i0:
+                i1 = i0 + 1
+
+            bucket_y = y[i0:i1]
+            if len(bucket_y) == 0:
+                continue
+
+            # Находим индексы min и max
+            local_min_idx = np.argmin(bucket_y)
+            local_max_idx = np.argmax(bucket_y)
+
+            # Глобальные индексы
+            idx_min = i0 + local_min_idx
+            idx_max = i0 + local_max_idx
+
+            # Добавляем в порядке появления
+            if idx_min < idx_max:
+                x_out.extend([x[idx_min], x[idx_max]])
+                y_out.extend([y[idx_min], y[idx_max]])
+            else:
+                x_out.extend([x[idx_max], x[idx_min]])
+                y_out.extend([y[idx_max], y[idx_min]])
+
+        return np.array(x_out), np.array(y_out)
+
+    else:
+        raise ValueError(f"Unknown downsample method: {method}")
+
 
 class BeaconDSPService:
     def __init__(self,
@@ -1131,14 +1328,148 @@ class BeaconDSPService:
 
                 elif cmd == "get_last_pulse":
                     # Возвращаем последние данные pulse с фазой и частотой
-                    if hasattr(self, 'last_pulse_data'):
-                        ack_ms = (time.time() - t_start) * 1000
-                        log.debug(f"cmd=get_last_pulse ack={ack_ms:.1f}ms")
-                        self.rep.send_json({"ok": True, "pulse": self.last_pulse_data})
-                    else:
+                    # Поддержка slice API: offset/span с units, max_samples, downsample
+
+                    if not hasattr(self, 'last_iq_seg') or self.last_iq_seg is None or self.last_iq_seg.size == 0:
                         ack_ms = (time.time() - t_start) * 1000
                         log.debug(f"cmd=get_last_pulse ack={ack_ms:.1f}ms error=no_data")
                         self.rep.send_json({"ok": False, "error": "No pulse data available"})
+                        continue
+
+                    try:
+                        # Извлекаем параметры slice (опциональные)
+                        slice_params = msg.get("slice", {})
+                        offset = slice_params.get("offset", 0)
+                        span = slice_params.get("span", "100%")
+                        units = slice_params.get("units", "auto")
+
+                        max_samples = msg.get("max_samples", "all")
+                        downsample_method = msg.get("downsample", "decimate")
+
+                        # IQ сегмент последнего импульса
+                        iq_seg = self.last_iq_seg.copy()
+                        n_total = len(iq_seg)
+                        fs = float(self.sample_rate)
+
+                        # Нормализуем slice в индексы
+                        i0, i1 = normalize_slice(offset, span, units, fs, n_total)
+
+                        # Вырезаем срез IQ
+                        iq_slice = iq_seg[i0:i1]
+                        n_slice = len(iq_slice)
+
+                        if n_slice < 2:
+                            self.rep.send_json({"ok": False, "error": "Slice too small"})
+                            continue
+
+                        # Обработка среза: фаза, FM, RMS
+                        # Используем те же функции что и при детекции
+
+                        # 1. Фаза
+                        res_phase = process_psk_impulse(
+                            iq_seg=iq_slice,
+                            fs=fs,
+                            baseline_ms=PSK_BASELINE_MS,
+                            t0_offset_ms=0.0,
+                            use_lpf_decim=True,
+                            remove_slope=True,
+                        )
+                        phase_xs_ms = res_phase.get("xs_ms", np.array([]))
+                        phase_ys_rad = res_phase.get("phase_rad", np.array([]))
+
+                        # 2. FM
+                        fm_out = fm_discriminator(
+                            iq=iq_slice,
+                            fs=fs,
+                            pre_lpf_hz=50_000,
+                            decim=4,
+                            smooth_hz=2_000,
+                            detrend=True,
+                            center=True,
+                            fir_taps=127,
+                        )
+                        fm_xs_ms = fm_out.get("xs_ms", np.array([]))
+                        fm_ys_hz = fm_out.get("freq_hz", np.array([]))
+
+                        # 3. RMS (на исходном IQ среза без децимации)
+                        win_samps = max(1, int(round(fs * (RMS_WIN_MS * 1e-3))))
+                        calib_offset_db = getattr(self.backend, 'calib_offset_db', 0.0) if self.backend else 0.0
+
+                        p_slice = np.abs(iq_slice)**2
+                        # Скользящее RMS окно (аналогично _process_samples)
+                        if p_slice.size >= win_samps:
+                            c = np.cumsum(p_slice, dtype=np.float64)
+                            S_valid = c[win_samps - 1:] - np.concatenate(([0.0], c[:-win_samps]))
+                            P_win = S_valid / float(win_samps)
+                            rms_dbm = self._db10(P_win) + DBM_OFFSET_DB + calib_offset_db
+                        else:
+                            rms_dbm = np.array([], dtype=np.float32)
+
+                        # Создаём временную ось для RMS (в миллисекундах относительно начала среза)
+                        rms_indices = np.arange(len(rms_dbm))
+                        rms_xs_ms = (rms_indices / fs) * 1000.0
+
+                        # Определяем t_unit для ответа
+                        if units == "samples":
+                            t_unit = "samples"
+                            # Конвертируем мс в индексы
+                            phase_xs_out = (phase_xs_ms / 1000.0 * fs).astype(int) + i0
+                            fm_xs_out = (fm_xs_ms / 1000.0 * fs).astype(int) + i0 if len(fm_xs_ms) > 0 else fm_xs_ms
+                            rms_xs_out = rms_indices + i0
+                        else:
+                            t_unit = "ms"
+                            phase_xs_out = phase_xs_ms
+                            fm_xs_out = fm_xs_ms
+                            rms_xs_out = rms_xs_ms
+
+                        # Применяем downsample если нужно
+                        if max_samples != "all":
+                            phase_xs_out, phase_ys_rad = apply_downsample(
+                                phase_xs_out, phase_ys_rad, max_samples, downsample_method
+                            )
+                            if len(fm_xs_out) > 0:
+                                fm_xs_out, fm_ys_hz = apply_downsample(
+                                    fm_xs_out, fm_ys_hz, max_samples, downsample_method
+                                )
+                            if len(rms_xs_out) > 0:
+                                rms_xs_out, rms_dbm = apply_downsample(
+                                    rms_xs_out, rms_dbm, max_samples, downsample_method
+                                )
+
+                        # Формируем ответ
+                        result = {
+                            "t_unit": t_unit,
+                            "phase": {
+                                "x": phase_xs_out.tolist() if isinstance(phase_xs_out, np.ndarray) else phase_xs_out,
+                                "y": phase_ys_rad.tolist() if isinstance(phase_ys_rad, np.ndarray) else phase_ys_rad
+                            },
+                            "fm": {
+                                "x": fm_xs_out.tolist() if isinstance(fm_xs_out, np.ndarray) else fm_xs_out,
+                                "y": fm_ys_hz.tolist() if isinstance(fm_ys_hz, np.ndarray) else fm_ys_hz
+                            },
+                            "rms": {
+                                "x": rms_xs_out.tolist() if isinstance(rms_xs_out, np.ndarray) else rms_xs_out,
+                                "y": rms_dbm.tolist() if isinstance(rms_dbm, np.ndarray) else rms_dbm
+                            },
+                            "meta": {
+                                "fs": fs,
+                                "i0": int(i0),
+                                "i1": int(i1),
+                                "src_len": int(n_total),
+                                "out_len": int(len(phase_xs_out)),
+                                "units_req": units,
+                                "downsample": downsample_method if max_samples != "all" else "none"
+                            }
+                        }
+
+                        ack_ms = (time.time() - t_start) * 1000
+                        log.debug(f"cmd=get_last_pulse ack={ack_ms:.1f}ms slice=[{i0}:{i1}] units={units}")
+                        self.rep.send_json({"ok": True, "pulse": result})
+
+                    except Exception as e:
+                        ack_ms = (time.time() - t_start) * 1000
+                        log.error(f"cmd=get_last_pulse ack={ack_ms:.1f}ms error: {e}")
+                        self.rep.send_json({"ok": False, "error": str(e)})
 
                 elif cmd == "save_sigmf":
                     # Сохранение последнего сегмента в SigMF
