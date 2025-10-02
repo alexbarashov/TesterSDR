@@ -971,8 +971,14 @@ class BeaconDSPService:
                     pulse_event_data["msg_hex"] = self.last_msg_hex
                     # IQ сегмент импульса и core gate (уже сохранены в self.last_iq_seg и self.last_core_gate)
                     if self.last_iq_seg is not None and self.last_iq_seg.size > 0:
-                        # Конвертируем в список для JSON сериализации
-                        pulse_event_data["iq_seg"] = self.last_iq_seg.tolist()
+                        # Конвертируем complex в пары [real, imag] для JSON сериализации
+                        iq_real = np.real(self.last_iq_seg).tolist()
+                        iq_imag = np.imag(self.last_iq_seg).tolist()
+                        # Чередуем real и imag: [r0, i0, r1, i1, ...]
+                        iq_interleaved = []
+                        for r, i in zip(iq_real, iq_imag):
+                            iq_interleaved.extend([r, i])
+                        pulse_event_data["iq_seg"] = iq_interleaved
                         pulse_event_data["core_gate"] = list(self.last_core_gate) if self.last_core_gate else None
                     else:
                         pulse_event_data["iq_seg"] = None

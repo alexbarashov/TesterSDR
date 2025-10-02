@@ -573,7 +573,11 @@ class Dsp2PlotUI:
         try:
             iq_seg = snapshot.get("iq_seg")
             if iq_seg is not None and len(iq_seg) > 0:
-                self.last_iq_seg = np.array(iq_seg, dtype=np.complex64)
+                # IQ приходит как чередующиеся [r0, i0, r1, i1, ...]
+                # Конвертируем в complex массив
+                iq_real = iq_seg[0::2]  # Четные индексы - real
+                iq_imag = iq_seg[1::2]  # Нечетные индексы - imag
+                self.last_iq_seg = np.array(iq_real, dtype=np.float32) + 1j * np.array(iq_imag, dtype=np.float32)
 
             core_gate = snapshot.get("core_gate")
             if core_gate is not None:
