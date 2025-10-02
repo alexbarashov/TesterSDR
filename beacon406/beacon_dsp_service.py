@@ -702,12 +702,6 @@ class BeaconDSPService:
             start_pos = np.where(trans == 1)[0]
             end_pos = np.where(trans == -1)[0] - 1
 
-            # ВРЕМЕННАЯ ДИАГНОСТИКА
-            if rms_dbm_vec.size > 0:
-                max_rms = np.max(rms_dbm_vec)
-                if max_rms > -60:  # Печатаем только если есть сигнал
-                    log.info(f"[DEBUG] max_rms={max_rms:.1f} dBm, thresh={PULSE_THRESH_DBM} dBm, pulses_detected={len(start_pos)}")
-
             # Склейка OFF (anti-chop): если пауза < OFF_HANG_MS → объединяем
             hang_samps = int(round(self.sample_rate * (OFF_HANG_MS * 1e-3)))
             pairs: list[Tuple[int, int]] = []
@@ -759,12 +753,8 @@ class BeaconDSPService:
                 duration_samps = max(1, found_end - start_abs + 1)
                 dur_ms = 1000.0 * duration_samps / float(self.sample_rate)
 
-                # ВРЕМЕННАЯ ДИАГНОСТИКА
-                log.info(f"[DEBUG] Pulse detected: dur={dur_ms:.1f} ms, min_required={MIN_PULSE_MS_FOR_PSK} ms")
-
                 # Фильтр длительности
                 if dur_ms < MIN_PULSE_MS_FOR_PSK:
-                    log.info(f"[DEBUG] Pulse REJECTED: too short ({dur_ms:.1f} ms < {MIN_PULSE_MS_FOR_PSK} ms)")
                     continue
 
                 # Статистика надпороговых
@@ -1002,7 +992,6 @@ class BeaconDSPService:
 
                     # Отправляем обогащенное pulse событие
                     self._emit("pulse", pulse_event_data)
-                    log.info(f"[DEBUG] Pulse event SENT: keys={sorted(pulse_event_data.keys())}, phase_xs_len={len(pulse_event_data.get('phase_xs_ms', []))}, phase_ys_len={len(pulse_event_data.get('phase_ys_rad', []))}")
 
                     # Отправляем PSK событие
                     self._emit("psk", asdict(PSKEvent(
@@ -1020,7 +1009,7 @@ class BeaconDSPService:
                     )))
 
                 except Exception as e:
-                    log.error(f"[DEBUG] PSK демодуляция FAILED: {e}", exc_info=True)
+                    log.info(f"PSK демодуляция пропущена: {e}")
                     # Отправляем базовое pulse событие без данных фазы
                     self._emit("pulse", pulse_event_data)
 
