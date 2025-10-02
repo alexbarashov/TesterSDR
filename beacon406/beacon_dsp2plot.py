@@ -583,31 +583,37 @@ class Dsp2PlotUI:
                 self._pulse_rms_x = rx
                 self._pulse_rms_y = ry
                 self.ln_pulse.set_data(rx, ry)
-                self.ax_pulse.set_xlim(rx.min(), rx.max())
-                ymin, ymax = np.nanmin(ry), np.nanmax(ry)
-                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                    self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
-                need_draw = True
+                xmin, xmax = rx.min(), rx.max()
+                if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
+                    self.ax_pulse.set_xlim(xmin, xmax)
+                    ymin, ymax = np.nanmin(ry), np.nanmax(ry)
+                    if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                        self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
+                    need_draw = True
 
             # Фаза график
             if px.size > 1 and py.size == px.size:
                 self._phase_x = px
                 self._phase_y = py
                 self.ln_phase.set_data(px, py)
-                self.ax_phase.set_xlim(px.min(), px.max())
-                self.ax_phase.set_ylim(-1.5, +1.5)
-                need_draw = True
+                xmin, xmax = px.min(), px.max()
+                if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
+                    self.ax_phase.set_xlim(xmin, xmax)
+                    self.ax_phase.set_ylim(-1.5, +1.5)
+                    need_draw = True
 
             # FM график
             if fx.size > 1 and fy.size == fx.size:
                 self._fm_x = fx
                 self._fm_y = fy
                 self.ln_fm.set_data(fx, fy)
-                self.ax_fm.set_xlim(fx.min(), fx.max())
-                ymin, ymax = np.nanmin(fy), np.nanmax(fy)
-                if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-                    self.ax_fm.set_ylim(ymin - 50, ymax + 50)
-                need_draw = True
+                xmin, xmax = fx.min(), fx.max()
+                if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
+                    self.ax_fm.set_xlim(xmin, xmax)
+                    ymin, ymax = np.nanmin(fy), np.nanmax(fy)
+                    if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+                        self.ax_fm.set_ylim(ymin - 50, ymax + 50)
+                    need_draw = True
 
             if need_draw:
                 self.fig2.canvas.draw_idle()
