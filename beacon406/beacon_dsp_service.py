@@ -933,10 +933,10 @@ class BeaconDSPService:
                     # Подготавливаем данные частоты для графика (из FM дискриминатора)
                     fr_xs_ms = None
                     fr_ys_hz = None
-                    if fm_out is not None and "xs_ms" in fm_out and "inst_freq_hz" in fm_out:
+                    if fm_out is not None and "xs_ms" in fm_out and "freq_hz" in fm_out:
                         fr_xs_down, fr_ys_down = downsample_data(
                             fm_out["xs_ms"],
-                            fm_out["inst_freq_hz"]
+                            fm_out["freq_hz"]
                         )
                         fr_xs_ms = fr_xs_down
                         fr_ys_hz = fr_ys_down
