@@ -76,7 +76,8 @@ READ_CHUNK          = 65_536
 PULSE_THRESH_DBM    = -45.0
 PULSE_STORE_SEC     = 1.5
 PSK_YLIMIT_RAD      = 1.5
-PSK_BASELINE_MS     = 2.0
+PSK_BASELINE_MS     = 10.0  # увеличено с 2.0 для уменьшения наклона фазы
+START_DELAY_MS      = 3.0   # пропуск начала несущей для устранения наклона фазы
 EPS                 = 1e-20
 DEBUG_IMPULSE_LOG   = True
 
@@ -1021,11 +1022,15 @@ class BeaconDSPService:
                 # PSK демодуляция/метрики
                 # Используем process_psk_impulse как в plot (без LPF можно оставить use_lpf_decim=True)
                 try:
+                    # Обрезаем начало для устранения наклона фазы
+                    skip_samples = int(START_DELAY_MS * 1e-3 * self.sample_rate)
+                    psk_seg = freq_seg[skip_samples:] if freq_seg.size > skip_samples else freq_seg
+
                     res = process_psk_impulse(
-                        iq_seg=freq_seg,
+                        iq_seg=psk_seg,
                         fs=self.sample_rate,
                         baseline_ms=PSK_BASELINE_MS,
-                        t0_offset_ms=0.0,
+                        t0_offset_ms=START_DELAY_MS,
                         use_lpf_decim=True,
                         remove_slope=True,
                     )
@@ -1365,12 +1370,21 @@ class BeaconDSPService:
                         # Обработка среза: фаза, FM, RMS
                         # Используем те же функции что и при детекции
 
-                        # 1. Фаза
+                        # 1. Фаза - обрезаем начало если запрашивается полный срез
+                        phase_slice = iq_slice
+                        t0_offset_for_phase = 0.0
+                        if i0 == 0:
+                            # Для полного среза применяем обрезку начала
+                            skip_samples = int(START_DELAY_MS * 1e-3 * fs)
+                            if iq_slice.size > skip_samples:
+                                phase_slice = iq_slice[skip_samples:]
+                                t0_offset_for_phase = START_DELAY_MS
+
                         res_phase = process_psk_impulse(
-                            iq_seg=iq_slice,
+                            iq_seg=phase_slice,
                             fs=fs,
                             baseline_ms=PSK_BASELINE_MS,
-                            t0_offset_ms=0.0,
+                            t0_offset_ms=t0_offset_for_phase,
                             use_lpf_decim=True,
                             remove_slope=True,
                         )
