@@ -1378,10 +1378,14 @@ class BeaconDSPService:
                         phase_xs_ms = res_phase.get("xs_ms", np.array([]))
                         phase_ys_rad = res_phase.get("phase_rad", np.array([]))
 
-                        # Обрезаем концовку фазы на PHASE_TRIM_END_MS
-                        if len(phase_xs_ms) > 0 and PHASE_TRIM_END_MS > 0:
-                            max_time_ms = phase_xs_ms.max() - PHASE_TRIM_END_MS
-                            mask = phase_xs_ms <= max_time_ms
+                        # Обрезаем концовку фазы на PHASE_TRIM_END_MS относительно конца импульса (i1)
+                        if len(phase_xs_ms) > 0 and PHASE_TRIM_END_MS > 0 and self.last_core_gate:
+                            g0, g1 = self.last_core_gate
+                            # Конец импульса в миллисекундах
+                            impulse_end_ms = (g1 / fs) * 1000.0
+                            # Обрезаем фазу на PHASE_TRIM_END_MS от конца импульса
+                            max_phase_time_ms = impulse_end_ms - PHASE_TRIM_END_MS
+                            mask = phase_xs_ms <= max_phase_time_ms
                             phase_xs_ms = phase_xs_ms[mask]
                             phase_ys_rad = phase_ys_rad[mask]
 
