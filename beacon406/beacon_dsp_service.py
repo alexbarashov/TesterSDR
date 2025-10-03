@@ -76,8 +76,8 @@ READ_CHUNK          = 65_536
 PULSE_THRESH_DBM    = -45.0
 PULSE_STORE_SEC     = 1.5
 PSK_YLIMIT_RAD      = 1.5
-PSK_BASELINE_MS     = 10.0  # увеличено с 2.0 для уменьшения наклона фазы
-START_DELAY_MS      = 3.0   # пропуск начала несущей для устранения наклона фазы
+PSK_BASELINE_MS     = 2.0
+PHASE_TRIM_END_MS   = 1.0   # обрезка концовки фазы (мс)
 EPS                 = 1e-20
 DEBUG_IMPULSE_LOG   = True
 
@@ -1022,15 +1022,11 @@ class BeaconDSPService:
                 # PSK демодуляция/метрики
                 # Используем process_psk_impulse как в plot (без LPF можно оставить use_lpf_decim=True)
                 try:
-                    # Обрезаем начало для устранения наклона фазы
-                    skip_samples = int(START_DELAY_MS * 1e-3 * self.sample_rate)
-                    psk_seg = freq_seg[skip_samples:] if freq_seg.size > skip_samples else freq_seg
-
                     res = process_psk_impulse(
-                        iq_seg=psk_seg,
+                        iq_seg=freq_seg,
                         fs=self.sample_rate,
                         baseline_ms=PSK_BASELINE_MS,
-                        t0_offset_ms=START_DELAY_MS,
+                        t0_offset_ms=0.0,
                         use_lpf_decim=True,
                         remove_slope=True,
                     )
@@ -1370,26 +1366,24 @@ class BeaconDSPService:
                         # Обработка среза: фаза, FM, RMS
                         # Используем те же функции что и при детекции
 
-                        # 1. Фаза - обрезаем начало если запрашивается полный срез
-                        phase_slice = iq_slice
-                        t0_offset_for_phase = 0.0
-                        if i0 == 0:
-                            # Для полного среза применяем обрезку начала
-                            skip_samples = int(START_DELAY_MS * 1e-3 * fs)
-                            if iq_slice.size > skip_samples:
-                                phase_slice = iq_slice[skip_samples:]
-                                t0_offset_for_phase = START_DELAY_MS
-
+                        # 1. Фаза
                         res_phase = process_psk_impulse(
-                            iq_seg=phase_slice,
+                            iq_seg=iq_slice,
                             fs=fs,
                             baseline_ms=PSK_BASELINE_MS,
-                            t0_offset_ms=t0_offset_for_phase,
+                            t0_offset_ms=0.0,
                             use_lpf_decim=True,
                             remove_slope=True,
                         )
                         phase_xs_ms = res_phase.get("xs_ms", np.array([]))
                         phase_ys_rad = res_phase.get("phase_rad", np.array([]))
+
+                        # Обрезаем концовку фазы на PHASE_TRIM_END_MS
+                        if len(phase_xs_ms) > 0 and PHASE_TRIM_END_MS > 0:
+                            max_time_ms = phase_xs_ms.max() - PHASE_TRIM_END_MS
+                            mask = phase_xs_ms <= max_time_ms
+                            phase_xs_ms = phase_xs_ms[mask]
+                            phase_ys_rad = phase_ys_rad[mask]
 
                         # 2. FM
                         fm_out = fm_discriminator(
