@@ -77,7 +77,8 @@ PULSE_THRESH_DBM    = -45.0
 PULSE_STORE_SEC     = 1.5
 PSK_YLIMIT_RAD      = 1.5
 PSK_BASELINE_MS     = 2.0
-PHASE_TRIM_END_MS   = 1.0   # обрезка концовки фазы (мс)
+START_DELAY_MS      = 1.0   # обрезка начала Phase и FM (мс)
+PHASE_TRIM_END_MS   = 1.0   # обрезка концовки Phase и FM (мс)
 EPS                 = 1e-20
 DEBUG_IMPULSE_LOG   = True
 
@@ -1402,6 +1403,21 @@ class BeaconDSPService:
                         )
                         fm_xs_ms = fm_out.get("xs_ms", np.array([]))
                         fm_ys_hz = fm_out.get("freq_hz", np.array([]))
+
+                        # Обрезаем начало и конец FM относительно границ импульса
+                        if len(fm_xs_ms) > 0 and self.last_core_gate:
+                            g0, g1 = self.last_core_gate
+                            impulse_start_ms = (g0 / fs) * 1000.0
+                            impulse_end_ms = (g1 / fs) * 1000.0
+
+                            # Обрезаем начало на START_DELAY_MS
+                            min_fm_time_ms = impulse_start_ms + START_DELAY_MS
+                            # Обрезаем конец на PHASE_TRIM_END_MS
+                            max_fm_time_ms = impulse_end_ms - PHASE_TRIM_END_MS
+
+                            mask = (fm_xs_ms >= min_fm_time_ms) & (fm_xs_ms <= max_fm_time_ms)
+                            fm_xs_ms = fm_xs_ms[mask]
+                            fm_ys_hz = fm_ys_hz[mask]
 
                         # 3. RMS (на исходном IQ среза без децимации)
                         win_samps = max(1, int(round(fs * (RMS_WIN_MS * 1e-3))))
