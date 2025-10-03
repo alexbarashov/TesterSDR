@@ -76,7 +76,9 @@ READ_CHUNK          = 65_536
 PULSE_THRESH_DBM    = -45.0
 PULSE_STORE_SEC     = 1.5
 PSK_YLIMIT_RAD      = 1.5
-PSK_BASELINE_MS     = 2.0
+PSK_BASELINE_MS     = 10.0
+PSK_BASELINE_OFFSET_MS = 10.0  # смещение окна baseline от начала импульса (мс)
+PSK_REMOVE_SLOPE    = True  # Включено как в beacon406_PSK_FM-plot.py
 START_DELAY_MS      = 1.0   # обрезка начала Phase и FM (мс)
 PHASE_TRIM_END_MS   = 1.0   # обрезка концовки Phase и FM (мс)
 EPS                 = 1e-20
@@ -519,8 +521,9 @@ class BeaconDSPService:
 
         self.backend = None
         self.sample_rate = float(SAMPLE_RATE_SPS)
-        self.nco_phase = 0.0
-        self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+        # NCO удалён - не используется
+        # self.nco_phase = 0.0
+        # self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
 
         # Эффективные значения BB shift (могут отличаться от констант для file-режима)
@@ -617,17 +620,19 @@ class BeaconDSPService:
 
         try:
             # Используем safe_make_backend с file_wait fallback
-            self.backend = safe_make_backend(
-                name,
-                sample_rate=SAMPLE_RATE_SPS,
-                center_freq=float(CENTER_FREQ_HZ),
-                gain_db=float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
-                agc=bool(ENABLE_AGC),
-                corr_ppm=int(FREQ_CORR_PPM),
-                device_args=args,
-                if_offset_hz=IF_OFFSET_HZ,
-                on_fail="file_wait"  # Мягкий fallback на ожидание файла
-            )
+            # ВАЖНО: для file backend НЕ передаём if_offset_hz (двойной shift)
+            backend_kwargs = {
+                "sample_rate": SAMPLE_RATE_SPS,
+                "center_freq": float(CENTER_FREQ_HZ),
+                "gain_db": float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
+                "agc": bool(ENABLE_AGC),
+                "corr_ppm": int(FREQ_CORR_PPM),
+                "device_args": args,
+                "on_fail": "file_wait"
+            }
+            if name != "file":
+                backend_kwargs["if_offset_hz"] = IF_OFFSET_HZ
+            self.backend = safe_make_backend(name, **backend_kwargs)
             if self.backend is None:
                 # Backend в режиме ожидания файла
                 log.warning("Backend in file_wait mode - waiting for CF32 file")
@@ -636,31 +641,39 @@ class BeaconDSPService:
                 self.effective_bb_shift_hz = 0.0
                 self.sample_rate = float(SAMPLE_RATE_SPS)
                 self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-                self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+                # NCO удалён
+                # self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
             else:
                 st = self.backend.get_status() or {}
                 self.sample_rate = float(st.get("actual_sample_rate_sps",
                                                getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS)))
                 self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-                self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+                # NCO удалён
+                # self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+
+                # BB shift флаги оставлены для совместимости, но NCO не применяется
+                self.effective_bb_shift_enable = BB_SHIFT_ENABLE
+                self.effective_bb_shift_hz = BB_SHIFT_HZ
+
                 log.info("\n=== BACKEND STATUS ===\n" + self.backend.pretty_status() + "\n======================\n")
         except Exception as e:
             log.error(f"Backend init failed: {e}")
             # Fallback на file_wait режим
             log.warning("Fallback to file_wait mode - no backend available")
             try:
+                # ВАЖНО: для file backend НЕ передаём if_offset_hz
                 self.backend = safe_make_backend(
                     "file",
                     sample_rate=SAMPLE_RATE_SPS,
                     center_freq=CENTER_FREQ_HZ,
-                    if_offset_hz=IF_OFFSET_HZ,
                     on_fail="file_wait"
                 )
             except Exception:
                 self.backend = None
             self.sample_rate = float(SAMPLE_RATE_SPS)
             self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+            # NCO удалён
+            # self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
 
     # ---------------- Threads ----------------
     def start(self):
@@ -856,12 +869,7 @@ class BeaconDSPService:
         base_idx = self.sample_counter
         x = samples.copy()
 
-        # BB shift (используем эффективные значения)
-        if self.effective_bb_shift_enable and abs(self.effective_bb_shift_hz) > 0:
-            n = np.arange(x.size, dtype=np.float64)
-            mixer = np.exp(1j * (self.nco_phase + self.nco_k * n)).astype(np.complex64)
-            x *= mixer
-            self.nco_phase = float((self.nco_phase + self.nco_k * x.size) % (2.0 * np.pi))
+        # NCO удалён - backend применяет mix_shift внутри read()
 
         with self._lock:
             self._append_samples(x)
@@ -1021,22 +1029,29 @@ class BeaconDSPService:
                     self.last_impulse_freq_hz = float(phase_diff.mean() * self.sample_rate / (2*np.pi))
 
                 # PSK демодуляция/метрики
-                # Используем process_psk_impulse как в plot (без LPF можно оставить use_lpf_decim=True)
+                # ИСПРАВЛЕНИЕ: используем seg вместо freq_seg для baseline коррекции
+                # freq_seg обрезан на 1мс с краёв, что сдвигает baseline окно
                 try:
+                    # ДИАГНОСТИКА: логируем параметры
+                    log.debug(f"PSK processing: freq_seg.size={freq_seg.size}, seg.size={seg.size}, "
+                             f"fs={self.sample_rate}, baseline_offset_ms={PSK_BASELINE_OFFSET_MS}, "
+                             f"remove_slope={PSK_REMOVE_SLOPE}")
+
                     res = process_psk_impulse(
-                        iq_seg=freq_seg,
+                        iq_seg=freq_seg,  # <-- ВОЗВРАТ: используем freq_seg как в beacon406_PSK_FM-plot.py
                         fs=self.sample_rate,
                         baseline_ms=PSK_BASELINE_MS,
+                        baseline_offset_ms=PSK_BASELINE_OFFSET_MS,
                         t0_offset_ms=0.0,
                         use_lpf_decim=True,
-                        remove_slope=True,
+                        remove_slope=PSK_REMOVE_SLOPE,
                     )
                     xs_ms = res.get("xs_ms")
                     phase_rad = res.get("phase_rad")
 
                     # FM для справки
                     fm_out = fm_discriminator(
-                        iq=freq_seg,
+                        iq=freq_seg,  # <-- используем freq_seg как в beacon406_PSK_FM-plot.py
                         fs=self.sample_rate,
                         pre_lpf_hz=50_000,
                         decim=4,
@@ -1104,19 +1119,22 @@ class BeaconDSPService:
                     self.last_msg_hex = str(msg_hex)
 
                     # Событие psk
-                    # Даунсэмплинг для веб-визуализации (max 1000 точек)
+                    # ИСПРАВЛЕНИЕ: Отключён даунсэмплинг для сохранения точности фазы
+                    # Даунсэмплинг искажает линейный тренд и создаёт артефакты
                     def downsample_data(xs, ys, max_points=1000):
-                        if xs is None or ys is None or len(xs) <= max_points:
-                            return xs, ys
-                        # Простой равномерный даунсэмплинг
-                        step = len(xs) // max_points
-                        if step <= 1:
-                            return xs, ys
-                        xs_down = xs[::step]
-                        ys_down = ys[::step]
-                        return xs_down.tolist(), ys_down.tolist()
+                        # ВРЕМЕННО ОТКЛЮЧЕНО: возвращаем полные данные
+                        return xs.tolist() if isinstance(xs, np.ndarray) else xs, ys.tolist() if isinstance(ys, np.ndarray) else ys
+                        # if xs is None or ys is None or len(xs) <= max_points:
+                        #     return xs, ys
+                        # # Простой равномерный даунсэмплинг
+                        # step = len(xs) // max_points
+                        # if step <= 1:
+                        #     return xs, ys
+                        # xs_down = xs[::step]
+                        # ys_down = ys[::step]
+                        # return xs_down.tolist(), ys_down.tolist()
 
-                    # Подготавливаем данные фазы для графика
+                    # Подготавливаем данные фазы для графика (БЕЗ даунсэмплинга)
                     phase_xs_down, phase_ys_down = downsample_data(xs_ms, phase_rad)
 
                     # Подготавливаем данные частоты для графика (из FM дискриминатора)
@@ -1364,60 +1382,22 @@ class BeaconDSPService:
                             self.rep.send_json({"ok": False, "error": "Slice too small"})
                             continue
 
-                        # Обработка среза: фаза, FM, RMS
-                        # Используем те же функции что и при детекции
+                        # ИСПОЛЬЗУЕМ УЖЕ ОБРАБОТАННЫЕ ДАННЫЕ ИЗ PUB СОБЫТИЯ
+                        # Не пересчитываем фазу/FM заново - берём из last_pulse_data
 
-                        # 1. Фаза
-                        res_phase = process_psk_impulse(
-                            iq_seg=iq_slice,
-                            fs=fs,
-                            baseline_ms=PSK_BASELINE_MS,
-                            t0_offset_ms=0.0,
-                            use_lpf_decim=True,
-                            remove_slope=True,
-                        )
-                        phase_xs_ms = res_phase.get("xs_ms", np.array([]))
-                        phase_ys_rad = res_phase.get("phase_rad", np.array([]))
-
-                        # Обрезаем концовку фазы на PHASE_TRIM_END_MS относительно конца импульса (i1)
-                        if len(phase_xs_ms) > 0 and PHASE_TRIM_END_MS > 0 and self.last_core_gate:
-                            g0, g1 = self.last_core_gate
-                            # Конец импульса в миллисекундах
-                            impulse_end_ms = (g1 / fs) * 1000.0
-                            # Обрезаем фазу на PHASE_TRIM_END_MS от конца импульса
-                            max_phase_time_ms = impulse_end_ms - PHASE_TRIM_END_MS
-                            mask = phase_xs_ms <= max_phase_time_ms
-                            phase_xs_ms = phase_xs_ms[mask]
-                            phase_ys_rad = phase_ys_rad[mask]
-
-                        # 2. FM
-                        fm_out = fm_discriminator(
-                            iq=iq_slice,
-                            fs=fs,
-                            pre_lpf_hz=50_000,
-                            decim=4,
-                            smooth_hz=2_000,
-                            detrend=True,
-                            center=True,
-                            fir_taps=127,
-                        )
-                        fm_xs_ms = fm_out.get("xs_ms", np.array([]))
-                        fm_ys_hz = fm_out.get("freq_hz", np.array([]))
-
-                        # Обрезаем начало и конец FM относительно границ импульса
-                        if len(fm_xs_ms) > 0 and self.last_core_gate:
-                            g0, g1 = self.last_core_gate
-                            impulse_start_ms = (g0 / fs) * 1000.0
-                            impulse_end_ms = (g1 / fs) * 1000.0
-
-                            # Обрезаем начало на START_DELAY_MS
-                            min_fm_time_ms = impulse_start_ms + START_DELAY_MS
-                            # Обрезаем конец на PHASE_TRIM_END_MS
-                            max_fm_time_ms = impulse_end_ms - PHASE_TRIM_END_MS
-
-                            mask = (fm_xs_ms >= min_fm_time_ms) & (fm_xs_ms <= max_fm_time_ms)
-                            fm_xs_ms = fm_xs_ms[mask]
-                            fm_ys_hz = fm_ys_hz[mask]
+                        # Получаем данные из сохранённого PUB события
+                        if hasattr(self, 'last_pulse_data') and self.last_pulse_data:
+                            # Берём уже обработанные данные из PUB
+                            phase_xs_ms = np.array(self.last_pulse_data.get("phase_xs_ms", []))
+                            phase_ys_rad = np.array(self.last_pulse_data.get("phase_ys_rad", []))
+                            fm_xs_ms = np.array(self.last_pulse_data.get("fr_xs_ms", []))
+                            fm_ys_hz = np.array(self.last_pulse_data.get("fr_ys_hz", []))
+                        else:
+                            # Fallback: если нет сохранённых данных (не должно происходить)
+                            phase_xs_ms = np.array([])
+                            phase_ys_rad = np.array([])
+                            fm_xs_ms = np.array([])
+                            fm_ys_hz = np.array([])
 
                         # 3. RMS (на исходном IQ среза без децимации)
                         win_samps = max(1, int(round(fs * (RMS_WIN_MS * 1e-3))))
@@ -1599,17 +1579,19 @@ class BeaconDSPService:
                                 else:
                                     actual_backend = new_backend_name
 
-                                self.backend = safe_make_backend(
-                                    actual_backend,
-                                    sample_rate=config.get("sample_rate_sps", SAMPLE_RATE_SPS),
-                                    center_freq=config.get("center_freq_hz", CENTER_FREQ_HZ),
-                                    gain_db=config.get("gain_db", TUNER_GAIN_DB),
-                                    agc=ENABLE_AGC,
-                                    corr_ppm=FREQ_CORR_PPM,
-                                    device_args=new_backend_args,
-                                    if_offset_hz=IF_OFFSET_HZ,
-                                    on_fail="file_wait"
-                                )
+                                # ВАЖНО: для file backend НЕ передаём if_offset_hz
+                                backend_kwargs = {
+                                    "sample_rate": config.get("sample_rate_sps", SAMPLE_RATE_SPS),
+                                    "center_freq": config.get("center_freq_hz", CENTER_FREQ_HZ),
+                                    "gain_db": config.get("gain_db", TUNER_GAIN_DB),
+                                    "agc": ENABLE_AGC,
+                                    "corr_ppm": FREQ_CORR_PPM,
+                                    "device_args": new_backend_args,
+                                    "on_fail": "file_wait"
+                                }
+                                if actual_backend != "file":
+                                    backend_kwargs["if_offset_hz"] = IF_OFFSET_HZ
+                                self.backend = safe_make_backend(actual_backend, **backend_kwargs)
 
                                 # Обновить параметры сервиса от backend
                                 with self._lock:
@@ -1617,18 +1599,26 @@ class BeaconDSPService:
                                     self.sample_rate = float(st.get("actual_sample_rate_sps",
                                                     getattr(self.backend, "actual_sample_rate_sps", SAMPLE_RATE_SPS)))
                                     self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-                                    self.nco_k = 2.0*np.pi*(BB_SHIFT_HZ/float(self.sample_rate))
+                                    # NCO удалён
+                                    # self.nco_k = 2.0*np.pi*(BB_SHIFT_HZ/float(self.sample_rate))
+
+                                    # Сброс буферов при смене backend
+                                    # self.nco_phase = 0.0
+                                    self.sample_counter = 0
+                                    self.samples_start_abs = 0
+                                    self.full_samples = np.empty(0, dtype=np.complex64)
+                                    self.full_idx = np.empty(0, dtype=np.int64)
+                                    self.full_rms = np.empty(0, dtype=np.float32)
+                                    self.tail_p = np.empty(0, dtype=np.float32)
+                                    self.in_pulse = False
+                                    self.pulse_start_abs = None
+
                                     self.backend_name = new_backend_name
                                     self.backend_args = new_backend_args
 
-                                    # Принудительно отключаем BB_SHIFT в файловом режиме
-                                    if actual_backend == "file":
-                                        self.effective_bb_shift_enable = False
-                                        self.effective_bb_shift_hz = 0.0
-                                        log.info("BB_SHIFT принудительно отключен в файловом режиме")
-                                    else:
-                                        self.effective_bb_shift_enable = config.get("bb_shift_enable", BB_SHIFT_ENABLE)
-                                        self.effective_bb_shift_hz = config.get("bb_shift_hz", BB_SHIFT_HZ)
+                                    # Для всех backend включаем BB shift (см. комментарий в _make_backend)
+                                    self.effective_bb_shift_enable = bool(config.get("bb_shift_enable", BB_SHIFT_ENABLE))
+                                    self.effective_bb_shift_hz = float(config.get("bb_shift_hz", BB_SHIFT_HZ))
 
                                     # Если backend успешно создан - переходим в ready
                                     if self.backend:
@@ -1673,22 +1663,11 @@ class BeaconDSPService:
 
                             if "freq_corr_hz" in config and hasattr(self.backend, 'set_freq_correction'):
                                 self.backend.set_freq_correction(float(config["freq_corr_hz"]))
-
-                            # BB_SHIFT параметры (если backend не менялся)
+                            
                             if "bb_shift_enable" in config:
-                                # Проверяем файловый режим
-                                if hasattr(self.backend, 'backend_name') and self.backend.backend_name == "file":
-                                    self.effective_bb_shift_enable = False
-                                    self.effective_bb_shift_hz = 0.0
-                                    log.warning("BB_SHIFT принудительно отключен в файловом режиме")
-                                else:
-                                    self.effective_bb_shift_enable = bool(config["bb_shift_enable"])
-
+                                self.effective_bb_shift_enable = bool(config["bb_shift_enable"])
                             if "bb_shift_hz" in config:
-                                if hasattr(self.backend, 'backend_name') and self.backend.backend_name == "file":
-                                    self.effective_bb_shift_hz = 0.0
-                                else:
-                                    self.effective_bb_shift_hz = float(config["bb_shift_hz"])
+                                self.effective_bb_shift_hz = float(config["bb_shift_hz"])
 
                         except Exception as e:
                             log.warning(f"Failed to apply light config params: {e}")
