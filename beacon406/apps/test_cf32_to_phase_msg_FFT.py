@@ -45,18 +45,20 @@ from lib.demod import phase_demod_psk_msg_safe
 # ==========================
 # Эти параметры должны совпадать с теми, что использовались при захвате данных
 SAMPLE_RATE_SPS  = 1_000_000 
-IF_OFFSET_HZ     = 0 #-25_000
+#IF_OFFSET_HZ     = 0 #-25_000
 FM_BASELINE_MS   = 2.0        
 FM_YLIMIT_KHZ    = 15.0 
 PSK_YLIMIT_RAD   = 1.5
-PSK_BASELINE_MS  = 10.0
+PSK_BASELINE_MS  = 10
+PSK_BASELINE_OFFSET_MS = 10
+PSK_REMOVE_SLOPE = True #False 
 
 # --- 1) Поиск импульса по RMS(dBm) ---
-THRESH_DBM   = -60.0      # подстрой под свой уровень
+THRESH_DBM   = -45.0      # подстрой под свой уровень
 #THRESH_DBM   = -45.0
 WIN_MS       = 1          # окно RMS  ??? для PSK можно 1ms но может быть обрезан последний бит 
 GUARD_MS     = 0.0        # добавление поля слева/справа к окну импульса
-START_DELAY_MS = 3.0      # обрезание начало сигнала ??? если начальная фаза больше или меньше 1.1 то убивает поиск фронта ???
+START_DELAY_MS = 1.0      # обрезание начало сигнала ??? если начальная фаза больше или меньше 1.1 то убивает поиск фронта ???
 CALIB_DB     = -30.0      # если хочешь, учти калибровку тракта
 
 
@@ -106,7 +108,7 @@ FILE_IQ_18 = r"rsa406_pulse_20250911_133526_dc.cf32"
 FILE_IQ_19 = r"UI_iq_1m.cf32"
 
 # формируем шаблон пути (сразу строка!)
-FILE_PATH = str(ROOT / "captures" / FILE_IQ_19)
+FILE_PATH = str(ROOT / "captures" / FILE_IQ_7)
 file_out = str(ROOT / "captures" / file_out_iq)
 
 
@@ -440,9 +442,10 @@ def run_self_test_psk(iq_data):
         iq_seg=iq_data,
         fs=SAMPLE_RATE_SPS,
         baseline_ms=PSK_BASELINE_MS,
+        baseline_offset_ms = PSK_BASELINE_OFFSET_MS,
         t0_offset_ms=t0_offset_ms, # проверить и включать поиск фронта в 50мс до конца несущей !!! 
         use_lpf_decim=True,
-        remove_slope=True,
+        remove_slope=PSK_REMOVE_SLOPE, 
     )
     dt = time.perf_counter() - t0
     print(f"process_psk_impulse() заняла {dt*1000:.3f} мс")

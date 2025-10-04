@@ -66,7 +66,9 @@ READ_CHUNK          = 65_536
 PULSE_THRESH_DBM    = -45.0
 PULSE_STORE_SEC     = 1.5
 PSK_YLIMIT_RAD       = 1.5
-PSK_BASELINE_MS      = 2.0
+PSK_BASELINE_MS      = 10.0
+START_DELAY_MS       = 1.0  # Обрезка начала графиков Phase и FM
+PHASE_TRIM_END_MS    = 1.0  # Обрезка конца графиков Phase и FM
 EPS = 1e-20
 DEBUG_IMPULSE_LOG   = True
 
@@ -270,6 +272,18 @@ class SoapySlidingRMS:
         self.ax_lvl.set_xlabel("Время, с")
         self.ax_lvl.set_ylabel("RMS, dBm")
         self.ax_lvl.grid(True, alpha=0.3)
+        # PULSE_THRESH_DBM линия
+        self.thr_line = self.ax_lvl.axhline(PULSE_THRESH_DBM, linestyle="--", linewidth=1.0)
+        try:
+            # компактная подпись в правом нижнем углу осей
+            self.thr_label = self.ax_lvl.text(
+                0.99, 0.02, f"Порог {PULSE_THRESH_DBM:.1f} dBm",
+                transform=self.ax_lvl.transAxes, ha="right", va="bottom", alpha=0.7
+            )
+        except Exception:
+            self.thr_label = None
+
+
         # Кнопки выбора backend
         ax_btn_auto = self.fig1.add_axes([0.02, 0.01, 0.08, 0.06])
         self.btn_auto = Button(ax_btn_auto, "Auto")
@@ -324,12 +338,8 @@ class SoapySlidingRMS:
 
         # --- UI: Figure 2 (Pulse + PSK + FM) ---
         self.fig2, (self.ax_pulse, self.ax_phase, self.ax_fm) = plt.subplots(
-            3, 1, figsize=(14, 8.6), height_ratios=[1, 1, 1]  # sharex убран
+            3, 1, figsize=(9, 7.5), height_ratios=[1, 1, 1], num="Pulse Analysis"
         )
-        # после создания:
-
-        self.ax_fm.sharex(self.ax_phase)
-
         # Позиционируем второе окно справа от первого
         try:
             mngr2 = self.fig2.canvas.manager
@@ -359,37 +369,33 @@ class SoapySlidingRMS:
         self.ax_fm.set_ylabel("FM, Hz")
         self.ax_fm.grid(True, alpha=0.3)
 
-        self.fig2.subplots_adjust(hspace=0.5, top=0.92, bottom=0.15)
-        self.fig2.suptitle(f"Импульс: RMS + Фаза (±{PSK_YLIMIT_RAD:.0f} rad) + FM(Hz)")
+        self.fig2.subplots_adjust(hspace=0.5, top=0.85, bottom=0.2)
+        self.fig2.suptitle("Импульс: RMS + Фаза + FM")
 
-        # --- Button: Save IQ (writes CF32, bit-for-bit) ---
-        ax_button_save = self.fig2.add_axes([0.70, 0.01, 0.15, 0.06])
-        # --- Button: Spectrum (static) ---
-        ax_button_spec = self.fig2.add_axes([0.54, 0.01, 0.15, 0.06])
-        self.btn_spec = Button(ax_button_spec, "Спектр")
-        self.btn_spec.on_clicked(self._on_show_spectrum)
+        # Нижние кнопки (по образцу beacon_dsp2plot.py)
+        ax_button_msg = self.fig2.add_axes([0.02, 0.01, 0.11, 0.06])
+        self.btn_msg = Button(ax_button_msg, "Сообщение")
+        self.btn_msg.on_clicked(self._on_show_message)
 
-        # Кнопка: Статус SDR (таблица)
-        ax_button_stat = self.fig2.add_axes([0.22, 0.01, 0.15, 0.06])
+        ax_button_stat = self.fig2.add_axes([0.15, 0.01, 0.11, 0.06])
         self.btn_stat = Button(ax_button_stat, "Статус SDR")
         self.btn_stat.on_clicked(self._on_show_sdr_status)
 
-        # --- Button: Params (snapshot) ---
-        ax_button_params = self.fig2.add_axes([0.38, 0.01, 0.15, 0.06])
+        ax_button_params = self.fig2.add_axes([0.28, 0.01, 0.11, 0.06])
         self.btn_params = Button(ax_button_params, "Параметры")
         self.btn_params.on_clicked(self._on_show_params)
+
+        ax_button_spec = self.fig2.add_axes([0.41, 0.01, 0.11, 0.06])
+        self.btn_spec = Button(ax_button_spec, "Спектр")
+        self.btn_spec.on_clicked(self._on_show_spectrum)
+
+        ax_button_save = self.fig2.add_axes([0.54, 0.01, 0.11, 0.06])
         self.btn_save = Button(ax_button_save, "Save IQ")
         self.btn_save.on_clicked(self._on_save_iq)
 
-        # --- NEW: Stop/Start toggle button for pulse+PSK window updates ---
-        ax_button_stop = self.fig2.add_axes([0.86, 0.01, 0.12, 0.06])
-        self.btn_stop = Button(ax_button_stop, "Стоп")
+        ax_button_pulsetoggle  = self.fig2.add_axes([0.67, 0.01, 0.11, 0.06])
+        self.btn_stop   = Button(ax_button_pulsetoggle , "Стоп")
         self.btn_stop.on_clicked(self._on_toggle_pulse_updates)
-
-        # --- Button: Message decoder ---
-        ax_button_msg = self.fig2.add_axes([0.06, 0.01, 0.15, 0.06])
-        self.btn_msg = Button(ax_button_msg, "Сообщение")
-        self.btn_msg.on_clicked(self._on_show_message)
 
     # ---- Message decoder window ----
     def _on_show_message(self, _event):
@@ -1673,8 +1679,8 @@ class SoapySlidingRMS:
                     # Фаза (середина)
                     if pulse_data.get("xs_fm_ms") is not None and pulse_data.get("phase_rad") is not None:
                         self.ln_phase.set_data(pulse_data["xs_fm_ms"], pulse_data["phase_rad"])
-                        t_start = 0.0
-                        t_end = float(pulse_data["xs_fm_ms"].max())
+                        t_start = START_DELAY_MS
+                        t_end = float(pulse_data["xs_fm_ms"].max()) - PHASE_TRIM_END_MS
                         self.ax_phase.set_xlim(t_start, t_end)
                         self.ax_phase.set_ylim(-PSK_YLIMIT_RAD, PSK_YLIMIT_RAD)
                         self.ax_phase.set_title(pulse_data["title"])
@@ -1682,25 +1688,31 @@ class SoapySlidingRMS:
                     # FM (низ)
                     if pulse_data.get("fm_xs_ms") is not None and pulse_data.get("fm_hz") is not None:
                         self.ln_fm.set_data(pulse_data["fm_xs_ms"], pulse_data["fm_hz"])
-                        # sharex=True → ось X уже синхронна, но на всякий случай:
-                        self.ax_fm.set_xlim(0.0, float(pulse_data["fm_xs_ms"].max()))
-                        # ось Y по FM оставим авто (можно прижать вручную при желании)
-                        #self.ax_fm.set_ylim(-3000, 3000)
-                        # Y — вот так:
+
+                        # X-окно
+                        t_start = float(START_DELAY_MS)
+                        t_end = float(pulse_data["fm_xs_ms"].max()) - float(PHASE_TRIM_END_MS)
+                        self.ax_fm.set_xlim(t_start, t_end)
+
+                        # Y-автомасштаб только по данным внутри X-окна
+                        fm_x = pulse_data.get("fm_xs_ms")
                         fm = pulse_data.get("fm_hz")
-                        if fm is not None and len(fm):
-                            ymin, ymax = float(np.nanmin(fm)), float(np.nanmax(fm))
-                            if ymin == ymax:
-                                # защита на плоскую линию
-                                pad = max(1.0, abs(ymin) * 0.1)
+                        if fm is not None and fm_x is not None and len(fm) and len(fm_x):
+                            # гарантируем numpy-маски
+                            fm_x = np.asarray(fm_x)
+                            fm = np.asarray(fm)
+                            mask = (fm_x >= t_start) & (fm_x <= t_end)
+                            fm_sel = fm[mask] if np.any(mask) else fm  # fallback на весь массив, если окно пустое
+                            if fm_sel.size:
+                                ymin, ymax = float(np.nanmin(fm_sel)), float(np.nanmax(fm_sel))
+                                if not (np.isfinite(ymin) and np.isfinite(ymax)):
+                                    ymin, ymax = -1.0, 1.0
+                                if ymin == ymax:
+                                    pad = max(1.0, abs(ymin) * 0.1)
+                                else:
+                                    pad = 0.05 * (ymax - ymin)
                                 self.ax_fm.set_ylim(ymin - pad, ymax + pad)
-                            else:
-                                pad = 0.05 * (ymax - ymin)
-                                self.ax_fm.set_ylim(ymin - pad, ymax + pad)
-                                                
-                        
-                        
-                        
+ 
                     self.fig2.canvas.draw_idle()
             except queue.Empty:
                 pass

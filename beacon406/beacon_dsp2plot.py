@@ -326,7 +326,7 @@ class Dsp2PlotUI:
 
         # ----- Figure 2: Pulse + Phase + FM -----
         self.fig2, (self.ax_pulse, self.ax_phase, self.ax_fm) = plt.subplots(
-            3, 1, figsize=(14, 8.6), height_ratios=[1, 1, 1], num="Pulse Analysis"
+            3, 1, figsize=(9, 7.5), height_ratios=[1, 1, 1], num="Pulse Analysis"
         )
         (self.ln_pulse,) = self.ax_pulse.plot([], [], lw=1.4)
         self.ax_pulse.set_ylabel("RMS, dBm")
@@ -343,33 +343,33 @@ class Dsp2PlotUI:
         self.ax_fm.set_ylabel("FM, Hz")
         self.ax_fm.grid(True, alpha=0.3)
 
-        self.fig2.subplots_adjust(hspace=0.5, top=0.92, bottom=0.15)
+        self.fig2.subplots_adjust(hspace=0.5, top=0.85, bottom=0.2)
         self.fig2.suptitle("Импульс: RMS + Фаза + FM")
 
         # Нижние кнопки (по образцу beacon406_PSK_FM-plot.py)
-        ax_button_msg = self.fig2.add_axes([0.06, 0.01, 0.15, 0.06])
+        ax_button_msg = self.fig2.add_axes([0.02, 0.01, 0.11, 0.06])
         self.btn_msg = Button(ax_button_msg, "Сообщение")
         self.btn_msg.on_clicked(self._on_show_message)
 
-        ax_button_stat = self.fig2.add_axes([0.22, 0.01, 0.15, 0.06])
+        ax_button_stat = self.fig2.add_axes([0.15, 0.01, 0.11, 0.06])
         self.btn_stat = Button(ax_button_stat, "Статус SDR")
         self.btn_stat.on_clicked(self._on_show_sdr_status)
 
-        ax_button_params = self.fig2.add_axes([0.38, 0.01, 0.15, 0.06])
+        ax_button_params = self.fig2.add_axes([0.28, 0.01, 0.11, 0.06])
         self.btn_params = Button(ax_button_params, "Параметры")
         self.btn_params.on_clicked(self._on_show_params)
 
-        ax_button_spec = self.fig2.add_axes([0.54, 0.01, 0.15, 0.06])
+        ax_button_spec = self.fig2.add_axes([0.41, 0.01, 0.11, 0.06])
         self.btn_spec = Button(ax_button_spec, "Спектр")
         self.btn_spec.on_clicked(self._on_show_spectrum)
 
-        ax_button_save = self.fig2.add_axes([0.70, 0.01, 0.15, 0.06])
+        ax_button_save = self.fig2.add_axes([0.54, 0.01, 0.11, 0.06])
         self.btn_save = Button(ax_button_save, "Save IQ")
         self.btn_save.on_clicked(self._on_save_iq)
 
-        ax_button_stop = self.fig2.add_axes([0.86, 0.01, 0.12, 0.06])
-        self.btn_stop = Button(ax_button_stop, "Стоп")
-        self.btn_stop.on_clicked(self._on_toggle_pulse_updates)
+        ax_button_pulsetoggle  = self.fig2.add_axes([0.67, 0.01, 0.11, 0.06])
+        self.btn_pulse_toggle   = Button(ax_button_pulsetoggle , "Стоп")
+        self.btn_pulse_toggle  .on_clicked(self._on_toggle_pulse_updates)
 
         # Single poll таймер (500ms для снижения нагрузки)
         self._timer = self.fig1.canvas.new_timer(interval=500)  # 500ms poll
@@ -569,6 +569,7 @@ class Dsp2PlotUI:
 
         # Запрашиваем данные через get_last_pulse с дефолтными параметрами (0% / 100% / all)
         try:
+            #rep = self.client.get_last_pulse()
             rep = self.client.get_last_pulse(
                 slice_params={"offset": "0%", "span": "100%", "units": "%"},
                 max_samples="all",
@@ -624,9 +625,10 @@ class Dsp2PlotUI:
                     t1_ms = (g1 / fs) * 1000.0
                     # Обрезаем данные фазы по времени импульса
                     mask = (px >= t0_ms) & (px <= t1_ms)
-                    if np.any(mask):
-                        px = px[mask]
-                        py = py[mask]
+                    px = px[mask] - t0_ms
+                    py = py[mask]
+                    self.ln_phase.set_data(px, py)
+                    self.ax_phase.set_xlim(px.min(), px.max())
 
                 self._phase_x = px
                 self._phase_y = py
@@ -652,9 +654,10 @@ class Dsp2PlotUI:
                     t1_ms = (g1 / fs) * 1000.0
                     # Обрезаем данные FM по времени импульса
                     mask = (fx >= t0_ms) & (fx <= t1_ms)
-                    if np.any(mask):
-                        fx = fx[mask]
-                        fy = fy[mask]
+                    fx = fx[mask] - t0_ms
+                    fy = fy[mask]
+                    self.ln_fm.set_data(fx, fy)
+                    self.ax_fm.set_xlim(fx.min(), fx.max())
 
                 self._fm_x = fx
                 self._fm_y = fy
@@ -719,8 +722,6 @@ class Dsp2PlotUI:
         cfg = {"backend_name": backend_name}
         if backend_name == "file" and path:
             cfg["backend_args"] = path
-            cfg["bb_shift_enable"] = False
-            cfg["bb_shift_hz"] = 0
 
         print(f"[backend_select] switching to {backend_name}")
         self.client.set_sdr_config(**cfg)
@@ -730,7 +731,7 @@ class Dsp2PlotUI:
         """Переключение обновлений второго окна (Стоп/Старт)."""
         self.pulse_updates_enabled = not self.pulse_updates_enabled
         try:
-            self.btn_stop.label.set_text("Старт" if not self.pulse_updates_enabled else "Стоп")
+            self.btn_pulse_toggle.label.set_text("Старт" if not self.pulse_updates_enabled else "Стоп")
         except Exception:
             pass
         state = "включено" if self.pulse_updates_enabled else "выключено"

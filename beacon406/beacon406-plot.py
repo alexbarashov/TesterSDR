@@ -20,7 +20,7 @@ import queue
 from tkinter import filedialog
 import tkinter as tk
 
-from lib.backends import make_backend, safe_make_backend
+from lib.backends import safe_make_backend
 from lib.metrics import process_psk_impulse
 from lib.demod import phase_demod_psk_msg_safe
 from lib.config import BACKEND_NAME, BACKEND_ARGS
@@ -849,7 +849,7 @@ class SoapySlidingRMS:
 
             extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ}
 
-            self.backend = make_backend(
+            self.backend = safe_make_backend(
                 "file",
                 sample_rate=SAMPLE_RATE_SPS,
                 center_freq=float(CENTER_FREQ_HZ),
@@ -921,7 +921,7 @@ class SoapySlidingRMS:
             # Попытаемся вернуться к исходному backend
             try:
                 extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
-                self.backend = make_backend(
+                self.backend = safe_make_backend(
                     BACKEND_NAME,
                     sample_rate=SAMPLE_RATE_SPS,
                     center_freq=float(CENTER_FREQ_HZ),
