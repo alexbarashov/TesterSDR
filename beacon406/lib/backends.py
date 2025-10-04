@@ -394,10 +394,8 @@ class SoapyBackend(SDRBackend):
 
 class FilePlaybackBackend(SDRBackend):
     def __init__(self, path: str, **kw):
-        # вытащим offset ДО super(), чтобы он не ушёл наверх
-        # FIXED: для file бэкенда принудительно отключаем if_offset_hz
-        _ = kw.pop("if_offset_hz", 0.0)  # удаляем из kwargs, но игнорируем значение
-        self._if_offset_hz = 0.0  # принудительно устанавливаем в 0.0
+        # Вернём поддержку IF, как было в v2/v3_1
+        self._if_offset_hz = float(kw.pop("if_offset_hz", 0.0) or 0.0)
 
         super().__init__(**kw)
         # NEW: для файла реальный Fs = заявленному sample_rate_sps
@@ -731,11 +729,13 @@ def make_backend(name: str,
             actual_center_freq = center_freq
             actual_path = path
 
-        # FIXED: для file бэкенда принудительно игнорируем if_offset_hz (всегда 0.0)
-        if_offset_hz = 0.0  # принудительно отключено для file режима
-        # Игнорируем любые переданные значения if_offset_hz для file бэкенда
-        _ = device_args.get("if_offset_hz") if isinstance(device_args, dict) else None
-        _ = extras.get("if_offset_hz") if isinstance(extras, dict) else None
+        # Уважать if_offset_hz, если он передан (device_args/extras)
+        if_offset_hz = 0.0
+        if isinstance(device_args, dict):
+            if_offset_hz = float(device_args.get("if_offset_hz",
+                              device_args.get("IF_OFFSET_HZ", if_offset_hz)))
+        if isinstance(extras, dict):
+            if_offset_hz = float(extras.get("if_offset_hz", if_offset_hz))
 
         return FilePlaybackBackend(
             path=actual_path,
@@ -744,7 +744,7 @@ def make_backend(name: str,
             gain_db=gain_db,
             agc=agc,
             corr_ppm=corr_ppm,
-            if_offset_hz=if_offset_hz,   # всегда 0.0 для file
+            if_offset_hz=if_offset_hz,
         )
 
     if name in ("tek_rsa", "rsa306", "rsa"):

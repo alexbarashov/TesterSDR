@@ -93,7 +93,8 @@ def _remove_linear_trend(y: np.ndarray) -> np.ndarray:
 def process_psk_impulse(
     iq_seg: np.ndarray,
     fs: int,
-    baseline_ms: float = 2.0, 
+    baseline_ms: float = 10.0,
+    baseline_offset_ms: float = 10.0,
     t0_offset_ms: float = 0.0,
     use_lpf_decim: bool = True,
     remove_slope: bool = True,
@@ -125,10 +126,20 @@ def process_psk_impulse(
     # (C) непрерывная фаза
     phi = np.unwrap(np.angle(iq_proc).astype(np.float64, copy=False))
 
-    # (D) ноль фазы = среднее первых baseline_ms
+    # (D) ноль фазы = среднее окна [baseline_offset_ms ... baseline_offset_ms + baseline_ms]
+    offset_pts = int(round(baseline_offset_ms * 1e-3 * fs_eff))
     base_pts = max(4, int(round(baseline_ms * 1e-3 * fs_eff)))
-    base_pts = min(base_pts, phi.size)
-    phi0 = float(np.mean(phi[:base_pts])) if base_pts > 0 else float(np.mean(phi))
+
+    # Проверяем границы окна baseline
+    start_idx = max(0, offset_pts)
+    end_idx = min(phi.size, offset_pts + base_pts)
+
+    if end_idx > start_idx and end_idx <= phi.size:
+        phi0 = float(np.mean(phi[start_idx:end_idx]))
+    else:
+        # Если окно выходит за границы, берём среднее всего массива
+        phi0 = float(np.mean(phi))
+
     phase_rad = phi - phi0
 
     # (E) (опц.) убрать линейный тренд (частотный оффсет)
@@ -143,6 +154,6 @@ def process_psk_impulse(
     if use_lpf_decim and LPF_ENABLE:
         lpf_tag = f" | LPF {LPF_CUTOFF_HZ/1e3:.1f} кГц, taps {LPF_TAPS}, decim×{DECIM}"
     slope_tag = " | detrend" if remove_slope else ""
-    title = f"PSK:(ноль=среднее {baseline_ms:.3f} мс){lpf_tag}{slope_tag}"
+    title = f"PSK:(ноль=[{baseline_offset_ms:.1f}..{baseline_offset_ms+baseline_ms:.1f}] мс){lpf_tag}{slope_tag}"
 
     return {"xs_ms": xs_ms, "phase_rad": phase_rad, "title": title}
