@@ -33,7 +33,31 @@ log = get_logger(__name__)
 import numpy as np
 from werkzeug.utils import secure_filename
 
+# ZeroMQ support для подключения к DSP сервису
+try:
+    import zmq
+    ZMQ_AVAILABLE = True
+except ImportError:
+    ZMQ_AVAILABLE = False
+    log.warning("ZeroMQ not available - running in local mode only")
+
 app = Flask(__name__)
+
+# ZeroMQ конфигурация
+zmq_enabled = os.getenv("USE_ZMQ", "false").lower() in ("true", "1", "yes")
+zmq_rep_addr = os.getenv("ZMQ_REP", "tcp://127.0.0.1:8782")
+zmq_pub_addr = os.getenv("ZMQ_PUB", "tcp://127.0.0.1:8781")
+zmq_req_timeout_ms = 5000
+zmq_context = None
+zmq_req_socket = None
+zmq_sub_thread = None
+zmq_lock = threading.Lock()
+cache_lock = threading.Lock()
+
+# Кэш событий от DSP сервиса
+cached_status = {}
+cached_pulse = {}
+cached_psk = {}
 
 # Глобальные переменные для SDR
 sdr_backend = None
@@ -166,6 +190,118 @@ def get_actual_fs() -> float:
     """Получить фактический sample rate"""
     global actual_sample_rate_sps
     return actual_sample_rate_sps
+
+# =============================================================================
+# ZeroMQ CLIENT FUNCTIONS
+# =============================================================================
+
+def zmq_send_req(cmd: str, **kwargs) -> dict:
+    """Отправка REQ команды в DSP сервис с автопересозданием сокета при ошибке"""
+    global zmq_req_socket
+
+    if not zmq_enabled or not ZMQ_AVAILABLE:
+        return {"ok": False, "error": "ZMQ disabled"}
+
+    try:
+        with zmq_lock:
+            if zmq_req_socket is None:
+                zmq_req_socket = zmq_context.socket(zmq.REQ)
+                zmq_req_socket.setsockopt(zmq.RCVTIMEO, zmq_req_timeout_ms)
+                zmq_req_socket.setsockopt(zmq.SNDTIMEO, zmq_req_timeout_ms)
+                zmq_req_socket.connect(zmq_rep_addr)
+                log.debug(f"ZMQ REQ socket connected to {zmq_rep_addr}")
+
+            msg = {"cmd": cmd, **kwargs}
+            zmq_req_socket.send_json(msg)
+            return zmq_req_socket.recv_json()
+    except zmq.Again:
+        log.warning(f"ZMQ timeout for cmd={cmd}")
+        # Пересоздаем сокет при таймауте
+        if zmq_req_socket:
+            zmq_req_socket.close()
+            zmq_req_socket = None
+        return {"ok": False, "error": "timeout"}
+    except Exception as e:
+        log.error(f"ZMQ error for cmd={cmd}: {e}")
+        if zmq_req_socket:
+            zmq_req_socket.close()
+            zmq_req_socket = None
+        return {"ok": False, "error": str(e)}
+
+def zmq_sub_listener():
+    """Фоновый поток для подписки на PUB события от DSP сервиса"""
+    global cached_status, cached_pulse, cached_psk, last_pulse_data, current_rms_dbm
+
+    log.info(f"ZMQ SUB thread starting, connecting to {zmq_pub_addr}")
+    sub = zmq_context.socket(zmq.SUB)
+    sub.connect(zmq_pub_addr)
+    sub.subscribe(b"status")
+    sub.subscribe(b"pulse")
+    sub.subscribe(b"psk")
+
+    while zmq_enabled:
+        try:
+            topic_bytes = sub.recv()
+            payload = sub.recv_json()
+            topic = topic_bytes.decode('utf-8')
+
+            with cache_lock:
+                if topic == "status":
+                    cached_status = payload
+                    # Обновляем current_rms_dbm для совместимости с UI
+                    if "last_rms_dbm" in payload:
+                        current_rms_dbm = payload["last_rms_dbm"]
+
+                elif topic == "pulse":
+                    cached_pulse = payload
+                    # Сохраняем для /api/last_pulse
+                    last_pulse_data = payload
+                    # Добавляем в историю
+                    if len(pulse_history) >= PULSE_HISTORY_MAX:
+                        pulse_history.popleft()
+                    pulse_history.append(payload)
+
+                elif topic == "psk":
+                    cached_psk = payload
+                    # Обновляем последний импульс PSK данными
+                    if last_pulse_data:
+                        last_pulse_data.update(payload)
+
+        except zmq.Again:
+            continue
+        except Exception as e:
+            log.error(f"ZMQ SUB error: {e}")
+            time.sleep(1)
+
+    sub.close()
+    log.info("ZMQ SUB thread stopped")
+
+def init_zmq():
+    """Инициализация ZeroMQ клиента"""
+    global zmq_context, zmq_sub_thread, zmq_enabled
+
+    if not zmq_enabled:
+        log.info("ZMQ disabled (USE_ZMQ not set)")
+        return
+
+    if not ZMQ_AVAILABLE:
+        log.warning("ZMQ library not available, disabling ZMQ mode")
+        zmq_enabled = False
+        return
+
+    try:
+        zmq_context = zmq.Context()
+        # Запускаем SUB слушатель в фоне
+        zmq_sub_thread = threading.Thread(target=zmq_sub_listener, daemon=True)
+        zmq_sub_thread.start()
+        log.info(f"ZMQ client initialized: REP={zmq_rep_addr}, PUB={zmq_pub_addr}")
+    except Exception as e:
+        log.error(f"Failed to initialize ZMQ: {e}")
+        zmq_enabled = False
+
+# =============================================================================
+# END ZeroMQ CLIENT FUNCTIONS
+# =============================================================================
 
 # STRICT_COMPAT: PSK-406 анализ с заглушкой демодуляции
 def analyze_psk406(iq_seg: np.ndarray, fs: float) -> dict:
@@ -312,8 +448,37 @@ def db10(x: np.ndarray) -> np.ndarray:
 
 def init_sdr_backend():
     """Инициализация SDR backend"""
-    global sdr_backend, sdr_device_info
+    global sdr_backend, sdr_device_info, actual_sample_rate_sps, iq_ring_buffer, win_samps, nco_k
 
+    # ZeroMQ режим - получаем информацию от DSP сервиса
+    if zmq_enabled:
+        log.info("ZMQ mode: querying DSP service for status")
+        resp = zmq_send_req("get_status")
+        if resp.get("ok"):
+            status = resp.get("status", {})
+            backend = status.get("backend", "unknown")
+            backend_args = status.get("backend_args", "")
+            fs = status.get("fs", SAMPLE_RATE_SPS)
+            ready = status.get("ready", False)
+
+            if ready:
+                sdr_device_info = f"DSP Service: {backend}"
+                if backend_args:
+                    sdr_device_info += f" ({backend_args[-30:]})"
+                actual_sample_rate_sps = fs
+                log.info(f"ZMQ DSP service ready: {sdr_device_info}, fs={fs:.0f} Hz")
+                return True
+            else:
+                sdr_device_info = f"DSP Service: {backend} (not ready)"
+                log.warning(f"DSP service not ready: {sdr_device_info}")
+                return False
+        else:
+            error = resp.get("error", "unknown")
+            sdr_device_info = f"DSP Service error: {error}"
+            log.error(f"Failed to connect to DSP service: {error}")
+            return False
+
+    # Локальный режим - инициализация как раньше
     # Если backend не настроен или auto, пробуем инициализацию
     if BACKEND_NAME == "none" or not BACKEND_NAME:
         sdr_device_info = "SDR disabled (config: none)"
@@ -345,7 +510,6 @@ def init_sdr_backend():
             log.info(f"SDR detected: {sdr_device_info}")
 
             # STRICT_COMPAT: Сохраняем actual sample rate и создаем буфер
-            global actual_sample_rate_sps, iq_ring_buffer, win_samps, nco_k
             actual_sample_rate_sps = status.get('actual_sample_rate_sps', SAMPLE_RATE_SPS)
             iq_ring_buffer = IQRingBuffer(duration_sec=3.0, sample_rate=actual_sample_rate_sps)
             # Обновляем win_samps и nco_k с фактическим sample rate
@@ -380,6 +544,20 @@ def start_sdr_capture():
     """Запуск захвата SDR данных в реальном времени"""
     global sdr_running, reader_thread
 
+    # ZeroMQ режим - отправляем команду DSP сервису
+    if zmq_enabled:
+        log.info("ZMQ mode: sending start_acquire to DSP service")
+        resp = zmq_send_req("start_acquire")
+        if resp.get("ok"):
+            sdr_running = True
+            log.info("DSP service started acquisition")
+            return True
+        else:
+            error = resp.get("error", "unknown")
+            log.error(f"Failed to start DSP service acquisition: {error}")
+            return False
+
+    # Локальный режим - запускаем как раньше
     if not sdr_backend:
         log.warning("SDR backend not initialized, cannot start capture")
         return False
@@ -397,6 +575,20 @@ def start_sdr_capture():
 def stop_sdr_capture():
     """Остановка захвата SDR данных"""
     global sdr_running
+
+    # ZeroMQ режим - отправляем команду DSP сервису
+    if zmq_enabled:
+        log.info("ZMQ mode: sending stop_acquire to DSP service")
+        resp = zmq_send_req("stop_acquire")
+        sdr_running = False
+        if resp.get("ok"):
+            log.info("DSP service stopped acquisition")
+        else:
+            error = resp.get("error", "unknown")
+            log.warning(f"Error stopping DSP service: {error}")
+        return
+
+    # Локальный режим - останавливаем как раньше
     sdr_running = False
     log.info("Real-time SDR capture stopped")
 
@@ -3697,38 +3889,62 @@ def api_status():
     fs2_var = STATE.fs2_hz + random.uniform(-0.5, 0.5)
     fs3_var = STATE.fs3_hz + random.uniform(-0.5, 0.5)
 
+    # ZeroMQ режим - получаем данные из кэша
+    if zmq_enabled:
+        with cache_lock:
+            # Копируем кэшированные данные
+            status_copy = cached_status.copy()
+            pulse_copy = cached_pulse.copy()
+            psk_copy = cached_psk.copy()
 
-    # Получаем информацию о статусе SDR
-    sdr_status = {}
-    if sdr_backend:
-        try:
-            sdr_status = sdr_backend.get_status() or {}
-        except Exception:
-            sdr_status = {}
+        # Получаем real-time RMS из cached_status
+        realtime_rms = status_copy.get("last_rms_dbm", -100.0)
 
-    # Получаем real-time данные от RMS анализа
-    realtime_rms = 0.0
-    realtime_pulse_count = 0
-    latest_pulse_info = None
+        # История импульсов уже обновляется в zmq_sub_listener
+        realtime_pulse_count = len(pulse_history)
 
-    if sdr_running:
-        # Получаем текущее RMS значение (без блокировки для упрощения)
-        try:
-            realtime_rms = current_rms_dbm
-        except NameError:
-            realtime_rms = -100.0  # Значение по умолчанию если переменная не определена
+        # Последний импульс из кэша
+        latest_pulse_info = pulse_copy if pulse_copy else None
 
-        # Считаем количество импульсов в очереди
-        realtime_pulse_count = pulse_queue.qsize()
+        # SDR статус из cached_status
+        sdr_status = {
+            'backend': status_copy.get('backend', 'unknown'),
+            'acq_state': status_copy.get('acq_state', 'stopped'),
+            'fs': status_copy.get('fs', SAMPLE_RATE_SPS),
+            'ready': status_copy.get('ready', False)
+        }
+    else:
+        # Локальный режим - получаем информацию о статусе SDR
+        sdr_status = {}
+        if sdr_backend:
+            try:
+                sdr_status = sdr_backend.get_status() or {}
+            except Exception:
+                sdr_status = {}
 
-        # Получаем информацию о последнем импульсе
-        try:
-            # Копируем очередь чтобы получить последний элемент без удаления
-            temp_queue = list(pulse_queue.queue)
-            if temp_queue:
-                latest_pulse_info = temp_queue[-1]
-        except:
-            pass
+        # Получаем real-time данные от RMS анализа
+        realtime_rms = 0.0
+        realtime_pulse_count = 0
+        latest_pulse_info = None
+
+        if sdr_running:
+            # Получаем текущее RMS значение (без блокировки для упрощения)
+            try:
+                realtime_rms = current_rms_dbm
+            except NameError:
+                realtime_rms = -100.0  # Значение по умолчанию если переменная не определена
+
+            # Считаем количество импульсов в очереди
+            realtime_pulse_count = pulse_queue.qsize()
+
+            # Получаем информацию о последнем импульсе
+            try:
+                # Копируем очередь чтобы получить последний элемент без удаления
+                temp_queue = list(pulse_queue.queue)
+                if temp_queue:
+                    latest_pulse_info = temp_queue[-1]
+            except:
+                pass
 
     # Backend sanity checks для array lengths (ТЗ 250927-3)
     phase_len = len(STATE.phase_data) if STATE.phase_data else 0
@@ -3788,7 +4004,29 @@ def api_status():
 def api_measure():
     global sdr_backend, sdr_device_info
 
-    # Инициализируем SDR если еще не инициализирован
+    # ZeroMQ режим - просто проверяем статус DSP сервиса
+    if zmq_enabled:
+        log.info("ZeroMQ mode: querying DSP service status")
+        resp = zmq_send_req("get_status")
+        if resp.get("ok"):
+            status = resp.get("status", {})
+            ready = status.get("ready", False)
+            backend = status.get("backend", "unknown")
+
+            return jsonify({
+                'status': 'measure triggered (ZMQ mode)',
+                'sdr_initialized': ready,
+                'sdr_device_info': sdr_device_info
+            })
+        else:
+            error = resp.get("error", "unknown")
+            return jsonify({
+                'status': 'DSP service connection failed',
+                'sdr_initialized': False,
+                'sdr_device_info': f"Error: {error}"
+            })
+
+    # Локальный режим - инициализируем SDR если еще не инициализирован
     if not sdr_backend:
         log.info("Initializing SDR backend for measurement...")
         success = init_sdr_backend()
@@ -3987,6 +4225,73 @@ def api_state():
 @app.route('/api/last_pulse')
 def api_last_pulse():
     """Получение информации о последнем импульсе и истории"""
+
+    # ZeroMQ режим - запрашиваем у DSP сервиса с поддержкой slice
+    if zmq_enabled:
+        # Получаем параметры slice из query string
+        offset = request.args.get('offset', type=int)
+        span = request.args.get('span', type=int)
+        units = request.args.get('units', 'samples')
+        max_samples = request.args.get('max_samples', type=int)
+        downsample = request.args.get('downsample', type=int)
+
+        # Формируем запрос к DSP сервису
+        req_params = {}
+        if offset is not None:
+            req_params['offset'] = offset
+        if span is not None:
+            req_params['span'] = span
+        if units:
+            req_params['units'] = units
+        if max_samples is not None:
+            req_params['max_samples'] = max_samples
+        if downsample is not None:
+            req_params['downsample'] = downsample
+
+        resp = zmq_send_req("get_last_pulse", **req_params)
+
+        if resp.get("ok"):
+            pulse_data = resp.get("pulse", {})
+
+            # Подготовка истории из pulse_history
+            with cache_lock:
+                history_items = []
+                for pulse in list(pulse_history)[-20:]:  # Последние ≤20 импульсов
+                    item = pulse.copy()
+                    # Усекаем msg_hex для сети (64 символа + ...)
+                    if item.get('msg_hex') and len(item['msg_hex']) > 64:
+                        item['msg_hex_short'] = item['msg_hex'][:64] + '...'
+                    else:
+                        item['msg_hex_short'] = item.get('msg_hex', '')
+                    history_items.append(item)
+
+            # Подготовка последнего импульса
+            last = None
+            if pulse_data:
+                last = pulse_data.copy()
+                if last.get('msg_hex') and len(last['msg_hex']) > 64:
+                    last['msg_hex_short'] = last['msg_hex'][:64] + '...'
+                else:
+                    last['msg_hex_short'] = last.get('msg_hex', '')
+
+            return jsonify({
+                'last': last,
+                'history': history_items,
+                'pulse_queue_size': len(pulse_history),
+                'timestamp': time.time()
+            })
+        else:
+            error = resp.get("error", "unknown")
+            log.warning(f"Failed to get last pulse from DSP service: {error}")
+            return jsonify({
+                'last': None,
+                'history': [],
+                'pulse_queue_size': 0,
+                'timestamp': time.time(),
+                'error': error
+            })
+
+    # Локальный режим - как раньше
     with data_lock:
         # STRICT_COMPAT: Подготовка истории импульсов для передачи
         history_items = []
@@ -4018,6 +4323,16 @@ def api_last_pulse():
 if __name__ == '__main__':
     log.info("Starting COSPAS/SARSAT Beacon Tester v2.1")
     log.info("Interface available at: http://127.0.0.1:8738/")
-    log.info("SDR will be initialized on Measure button press")
+
+    # Инициализируем ZeroMQ если включен
+    init_zmq()
+
+    if zmq_enabled:
+        log.info("ZeroMQ mode enabled - connecting to DSP service")
+        log.info(f"  REP: {zmq_rep_addr}")
+        log.info(f"  PUB: {zmq_pub_addr}")
+    else:
+        log.info("Local SDR mode - SDR will be initialized on Measure button press")
+
     log.info("To stop: Ctrl+C")
     app.run(host='127.0.0.1', port=8738, debug=True)
