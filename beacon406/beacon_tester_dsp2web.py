@@ -25,6 +25,7 @@ from typing import Dict, Any, Optional
 
 import zmq
 from flask import Flask, render_template_string, jsonify, request, Response
+from werkzeug.utils import secure_filename
 
 # Настройка логирования
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -423,6 +424,79 @@ def api_sdr_set_config():
     except Exception as e:
         log.error(f"Failed to set SDR config: {e}")
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/upload', methods=['POST'])
+def api_upload():
+    """Загрузка CF32 файла на сервер и автоматическая установка file backend"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'status': 'error', 'error': 'No file provided'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'status': 'error', 'error': 'No file selected'}), 400
+
+        # Проверяем расширение файла
+        valid_extensions = ['.cf32', '.f32', '.sigmf-meta', '.iq', '.bin', '.wav', '.raw', '.dat']
+        has_valid_extension = any(file.filename.lower().endswith(ext) for ext in valid_extensions)
+
+        if not has_valid_extension:
+            return jsonify({'status': 'error', 'error': f'Only files with extensions {", ".join(valid_extensions)} are allowed'}), 400
+
+        # Безопасное имя файла
+        filename = secure_filename(file.filename)
+
+        # Создаем папку uploads если её нет
+        upload_dir = os.path.join(os.path.dirname(__file__), '..', 'captures', 'uploads')
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Путь для сохранения файла
+        file_path = os.path.join(upload_dir, filename)
+        file_path = os.path.abspath(file_path)
+
+        # Сохраняем файл
+        file.save(file_path)
+        log.info(f"File uploaded: {filename} -> {file_path}, size: {os.path.getsize(file_path)} bytes")
+
+        # Автоматически устанавливаем file backend с загруженным файлом
+        config_data = {
+            'backend_name': 'file',
+            'backend_args': file_path
+        }
+
+        command = {
+            'cmd': 'set_sdr_config',
+            'config': config_data
+        }
+
+        response = send_command(command)
+        if response and response.get('ok'):
+            log.info(f"File backend configured with: {file_path}")
+            return jsonify({
+                'status': 'success',
+                'filename': filename,
+                'file_path': file_path,
+                'size': os.path.getsize(file_path),
+                'backend_applied': True,
+                'message': f'File uploaded and backend configured: {filename}'
+            })
+        else:
+            # Файл загружен, но не удалось настроить backend
+            error_msg = response.get('error', 'Failed to configure file backend') if response else 'No response from DSP service'
+            log.warning(f"File uploaded but backend configuration failed: {error_msg}")
+            return jsonify({
+                'status': 'success',
+                'filename': filename,
+                'file_path': file_path,
+                'size': os.path.getsize(file_path),
+                'backend_applied': False,
+                'error': error_msg,
+                'message': f'File uploaded but backend configuration failed: {error_msg}'
+            })
+
+    except Exception as e:
+        log.error(f"Failed to upload file: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 # === Полный HTML шаблон с адаптацией под DSP2Web ===
 HTML_TEMPLATE = '''
@@ -860,9 +934,10 @@ HTML_TEMPLATE = '''
                         <span>Time scale</span>
                         <select class="control-input" id="timeScale" onchange="onTimeScaleChange()" style="width: 60px;">
                             <option value="1">1%</option>
+                            <option value="2">2%</option>
                             <option value="5">5%</option>
                             <option value="10" selected>10%</option>
-                            <option value="25">25%</option>
+                            <option value="20">20%</option>
                             <option value="50">50%</option>
                             <option value="100">100%</option>
                         </select>
@@ -961,7 +1036,9 @@ HTML_TEMPLATE = '''
         let canvas = document.getElementById('phaseChart');
         let ctx = canvas.getContext('2d');
         let currentView = 'phase';
-        let currentTimeScale = 10;
+        let currentTimeScale = 10; // Текущий масштаб времени в процентах (по умолчанию 10%)
+        const MESSAGE_DURATION_MS = 440; // Длительность сообщения в миллисекундах
+        const PHASE_START_OFFSET_MS = 0; // Начинаем отображение графика с 0мс (без смещения)
         let eventSource = null;
         let showLastDataOnSwitch = true; // Состояние чекбокса
 
@@ -1179,6 +1256,93 @@ HTML_TEMPLATE = '''
             document.getElementById('sdrModal').style.display = 'none';
         }
 
+        async function handleFileSelection(input) {
+            // Обработка выбора файла для file backend - загрузка на сервер
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                const fileName = file.name;
+
+                // Проверка расширения файла
+                const validExtensions = ['.cf32', '.f32', '.sigmf-meta', '.iq', '.bin', '.wav', '.raw', '.dat'];
+                const hasValidExtension = validExtensions.some(ext => fileName.toLowerCase().endsWith(ext));
+
+                if (!hasValidExtension) {
+                    alert(`Выберите файл с расширением: ${validExtensions.join(', ')}`);
+                    input.value = ''; // Очистить выбор
+                    return;
+                }
+
+                // Показываем индикацию загрузки
+                const selectedFileName = document.getElementById('selectedFileName');
+                if (selectedFileName) {
+                    selectedFileName.textContent = `Загрузка файла: ${fileName}...`;
+                }
+                logEvent('info', `Uploading file: ${fileName}`);
+
+                // Загрузка файла через FormData
+                const formData = new FormData();
+                formData.append('file', file);
+
+                try {
+                    const response = await fetch('/api/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+
+                    if (result.status === 'success') {
+                        console.log('File uploaded successfully:', result);
+                        logEvent('status', `File uploaded: ${fileName} (${result.size} bytes)`);
+
+                        // Обновляем поле с путём к файлу
+                        const filePathInput = document.getElementById('filePathInput');
+                        if (filePathInput) {
+                            filePathInput.value = result.file_path || fileName;
+                        }
+
+                        // Обновляем информационную строку
+                        if (selectedFileName) {
+                            if (result.backend_applied) {
+                                selectedFileName.textContent = `Загружен и активирован: ${fileName}`;
+                            } else {
+                                selectedFileName.textContent = `Загружен: ${fileName} (требуется применить конфигурацию)`;
+                            }
+                        }
+
+                        // Обновляем данные после успешной загрузки и применения backend
+                        if (result.backend_applied) {
+                            console.log('=== FILE UPLOADED AND BACKEND APPLIED ===');
+                            // Закрываем модальное окно конфигурации
+                            closeSDRConfig();
+                            // НЕ вызываем loadDataForView здесь - данные придут через SSE события pulse/psk
+                            // Это устраняет двойной вызов loadDataForView
+                            console.log('Waiting for pulse/psk events to trigger data update...');
+                        }
+                    } else {
+                        console.error('Upload failed:', result);
+                        logEvent('error', `Upload failed: ${result.error || 'Unknown error'}`);
+                        alert(`Ошибка загрузки файла: ${result.error || 'Unknown error'}`);
+
+                        if (selectedFileName) {
+                            selectedFileName.textContent = '';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Upload error:', error);
+                    logEvent('error', `Upload error: ${error.message}`);
+                    alert(`Ошибка загрузки файла: ${error.message}`);
+
+                    if (selectedFileName) {
+                        selectedFileName.textContent = '';
+                    }
+                }
+
+                // Очищаем input для возможности повторной загрузки того же файла
+                input.value = '';
+            }
+        }
+
         function switchTab(tabName) {
             // Скрыть все вкладки
             document.getElementById('radioTab').classList.remove('active');
@@ -1204,6 +1368,15 @@ HTML_TEMPLATE = '''
                     document.getElementById('sample_rate_sps').value = config.sample_rate_sps || '';
                     document.getElementById('bb_shift_hz').value = config.bb_shift_hz || '';
                     document.getElementById('bb_shift_enable').checked = config.bb_shift_enable || false;
+
+                    // Загружаем путь к файлу для file backend
+                    if (config.backend_name === 'file' && config.backend_args) {
+                        const filePathInput = document.getElementById('filePathInput');
+                        if (filePathInput) {
+                            filePathInput.value = config.backend_args;
+                        }
+                    }
+
                     // Обновляем состояние BB shift UI после загрузки конфигурации
                     updateBBShiftUI();
                     document.getElementById('freq_corr_hz').value = config.freq_corr_hz || '';
@@ -1228,7 +1401,19 @@ HTML_TEMPLATE = '''
                 logEvent('warning', `Invalid backend_name, reset to 'auto'`);
             }
 
-            // Собрать данные из формы
+            // Проверка для file backend: должен быть загружен файл
+            if (backendValue === 'file') {
+                const filePathInput = document.getElementById('filePathInput');
+                const filePath = filePathInput ? filePathInput.value.trim() : '';
+
+                if (!filePath) {
+                    logEvent('warning', 'File backend selected but no file uploaded');
+                    alert('Пожалуйста, сначала загрузите файл через кнопку "..." для file backend');
+                    return;
+                }
+            }
+
+            // Собрать данные из формы (backend_args для file устанавливается при загрузке файла)
             const config = {
                 backend_name: backendValue,
                 center_freq_hz: parseFrequencyInput(document.getElementById('center_freq_hz').value),
@@ -1241,6 +1426,14 @@ HTML_TEMPLATE = '''
                 bias_t: document.getElementById('bias_t').checked,
                 antenna: document.getElementById('antenna').value
             };
+
+            // Для file backend добавляем путь к файлу (уже загруженный на сервер)
+            if (backendValue === 'file') {
+                const filePathInput = document.getElementById('filePathInput');
+                const filePath = filePathInput.value.trim();
+                config.backend_args = filePath;
+                logEvent('info', `Applying file backend: ${filePath}`);
+            }
 
             // Отправить конфигурацию
             fetch('/api/sdr/set_config', {
@@ -1378,10 +1571,16 @@ HTML_TEMPLATE = '''
         function updateLiveStatus(data) {
             // Обновляем live индикаторы из SSE событий
             if (data.sdr) {
-                document.getElementById('sdr-device').textContent = data.sdr;
+                const sdrElement = document.getElementById('sdr-device');
+                if (sdrElement) {
+                    sdrElement.textContent = data.sdr;
+                }
             }
             if (data.cpu !== undefined) {
-                document.getElementById('cpu-usage').textContent = data.cpu.toFixed(1) + '%';
+                const cpuElement = document.getElementById('cpu-usage');
+                if (cpuElement) {
+                    cpuElement.textContent = data.cpu.toFixed(1) + '%';
+                }
             }
         }
 
@@ -1397,6 +1596,8 @@ HTML_TEMPLATE = '''
         }
 
         function renderSignalParams(data) {
+            console.log('=== renderSignalParams called, data keys:', data ? Object.keys(data).slice(0,10) : 'null');
+
             // Функция для отображения параметров сигнала в правой панели
             if (!data) {
                 // Если данных нет - показываем прочерки
@@ -1544,9 +1745,6 @@ HTML_TEMPLATE = '''
             if (data.fall_us !== undefined) {
                 document.getElementById('tFall').textContent = data.fall_us.toFixed(1);
             }
-
-            // Рисуем график в зависимости от текущего режима
-            drawChart(data);
         }
 
         function logEvent(type, message) {
@@ -1646,6 +1844,8 @@ HTML_TEMPLATE = '''
         }
 
         function loadGraphData(viewType) {
+            console.log('=== loadGraphData called for:', viewType);
+
             // Для графиков используем текущий time scale
             const span_ms = currentTimeScale * 10; // currentTimeScale это ms/div
 
@@ -1662,6 +1862,10 @@ HTML_TEMPLATE = '''
                             // Если данных нет, оставляем пустой шаблон
                             console.log('No data available for', viewType);
                         }
+
+                        // Обновляем Signal Parameters и hex сообщение
+                        renderSignalParams(data);
+                        updateDisplay(data);
                     }
                 })
                 .catch(error => {
@@ -1681,17 +1885,27 @@ HTML_TEMPLATE = '''
             console.log('Show last data on switch:', showLastDataOnSwitch);
         }
 
+        // Функция расчета смещения в зависимости от масштаба
+        function getOffsetForScale(scale) {
+            switch(scale) {
+                case 1: return 1;  // 1% -> -1ms
+                case 2: return 2;  // 2% -> -2ms
+                case 5: return 4;  // 5% -> -4ms
+                case 10:
+                case 20:
+                case 50: return 5; // 10%-50% -> -5ms
+                default: return 5; // fallback
+            }
+        }
+
         function onTimeScaleChange() {
-            const select = document.getElementById('timeScale');
-            currentTimeScale = parseInt(select.value);
+            const timeScaleSelect = document.getElementById('timeScale');
+            currentTimeScale = parseInt(timeScaleSelect.value);
             console.log('Time scale changed to:', currentTimeScale + '%');
 
-            // Для графиков фазы и частоты перезагружаем с новым масштабом
+            // Перерисовываем график с новым масштабом если данные загружены
             if (currentView === 'phase' || currentView === 'inburst_fr') {
                 loadDataForView(currentView);
-            } else {
-                // Для остальных режимов используем общую загрузку
-                loadLastPulse();
             }
         }
 
@@ -1728,14 +1942,19 @@ HTML_TEMPLATE = '''
         }
 
         function drawPhaseView(data) {
+            console.log('=== drawPhaseView called, data keys:', data ? Object.keys(data).slice(0,10) : 'null');
+            console.log('=== phase_xs_ms length:', data?.phase_xs_ms?.length, 'phase_ys_rad length:', data?.phase_ys_rad?.length);
+
             const width = canvas.width;
             const height = canvas.height;
+
+            ctx.clearRect(0, 0, width, height);
 
             // Сетка
             ctx.strokeStyle = '#e9ecef';
             ctx.lineWidth = 1;
 
-            // Горизонтальные линии (10 делений)
+            // Горизонтальные линии сетки
             for (let i = 0; i <= 10; i++) {
                 const y = (height / 10) * i;
                 ctx.beginPath();
@@ -1744,9 +1963,9 @@ HTML_TEMPLATE = '''
                 ctx.stroke();
             }
 
-            // Вертикальные линии (8 делений для времени)
+            // Вертикальные линии сетки с временными метками
             ctx.fillStyle = '#6c757d';
-            ctx.font = '10px Arial';
+            ctx.font = '12px Arial';
             for (let i = 0; i <= 8; i++) {
                 const x = (width / 8) * i;
                 ctx.beginPath();
@@ -1754,12 +1973,19 @@ HTML_TEMPLATE = '''
                 ctx.lineTo(x, height);
                 ctx.stroke();
 
-                // Временные метки
-                if (data && data.phase_xs_ms && data.phase_xs_ms.length > 0) {
-                    const timeRange = data.phase_xs_ms[data.phase_xs_ms.length - 1] - data.phase_xs_ms[0];
-                    const timeMs = (data.phase_xs_ms[0] + i * timeRange / 8).toFixed(1);
-                    ctx.fillText(timeMs + ' ms', x - 15, height - 5);
+                // Временные метки с учетом масштаба
+                const scaledDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100);
+                let startOffset;
+                if (currentTimeScale === 100) {
+                    startOffset = 0; // При 100% начинаем с 0мс
+                } else {
+                    // Для других масштабов: начало модуляции - смещение в зависимости от масштаба
+                    const preambleMs = data?.preamble_ms_value || 10.0; // fallback
+                    const offsetMs = getOffsetForScale(currentTimeScale);
+                    startOffset = Math.max(0, preambleMs - offsetMs);
                 }
+                const timeMs = (startOffset + i * scaledDuration / 8).toFixed(1);
+                ctx.fillText(timeMs, x - 10, height - 5);
             }
 
             // Нулевая линия
@@ -1770,87 +1996,126 @@ HTML_TEMPLATE = '''
             ctx.lineTo(width, height / 2);
             ctx.stroke();
 
-            // Пунктирные линии на ±1.1 радиан
+            // Пунктирные линии на уровне ±1.1 радиан
+            const phaseScale = 1.25; // Фиксированный масштаб ±1.25 радиан
             ctx.strokeStyle = '#FF0000';
             ctx.lineWidth = 1;
             ctx.setLineDash([5, 5]);
 
-            const phaseScale = 1.25; // радиан
+            // Линия +1.1 рад
             const y_plus_1_1 = height / 2 - (1.1 / phaseScale) * (height / 2);
             ctx.beginPath();
             ctx.moveTo(0, y_plus_1_1);
             ctx.lineTo(width, y_plus_1_1);
             ctx.stroke();
 
+            // Линия -1.1 рад
             const y_minus_1_1 = height / 2 + (1.1 / phaseScale) * (height / 2);
             ctx.beginPath();
             ctx.moveTo(0, y_minus_1_1);
             ctx.lineTo(width, y_minus_1_1);
             ctx.stroke();
 
+            // Возвращаем сплошную линию
             ctx.setLineDash([]);
 
-            // Y-axis метки
+            // Y-axis метки с фиксированным масштабом
             ctx.fillStyle = '#6c757d';
-            ctx.font = '10px Arial';
-            ctx.fillText('+' + phaseScale.toFixed(2) + ' rad', 5, 15);
+            ctx.font = '12px Arial';
+            ctx.fillText(`+${phaseScale.toFixed(2)} rad`, 5, 15);
             ctx.fillText('0', 5, height / 2 + 4);
-            ctx.fillText('-' + phaseScale.toFixed(2) + ' rad', 5, height - 10);
+            ctx.fillText(`-${phaseScale.toFixed(2)} rad`, 5, height - 10);
 
             // Рисуем данные фазы если есть
             if (data && data.phase_xs_ms && data.phase_ys_rad &&
                 data.phase_xs_ms.length > 0 && data.phase_ys_rad.length > 0) {
 
-                ctx.strokeStyle = '#0066FF';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
+                const xsMs = data.phase_xs_ms.map(v => Number(v));
+                const ysRad = data.phase_ys_rad.map(v => Number(v));
 
-                const xsMs = data.phase_xs_ms;
-                const ysRad = data.phase_ys_rad;
-                const xMin = xsMs[0];
-                const xMax = xsMs[xsMs.length - 1];
-                const xRange = xMax - xMin || 1;
+                // Временное окно для отображения
+                let windowStart;
+                if (currentTimeScale === 100) {
+                    windowStart = 0; // При 100% начинаем с 0мс
+                } else {
+                    // Для других масштабов: начало модуляции - смещение
+                    const preambleMs = data.preamble_ms_value || 10.0;
+                    const offsetMs = getOffsetForScale(currentTimeScale);
+                    windowStart = Math.max(0, preambleMs - offsetMs);
+                }
+                const windowDuration = MESSAGE_DURATION_MS * (currentTimeScale / 100.0);
+                const windowEnd = windowStart + windowDuration;
 
+                console.log(`DEBUG time window: start=${windowStart}ms, duration=${windowDuration}ms, end=${windowEnd}ms, scale=${currentTimeScale}%`);
+
+                // Фильтруем точки по временному окну
+                const filteredPoints = [];
                 for (let i = 0; i < xsMs.length; i++) {
-                    const x = ((xsMs[i] - xMin) / xRange) * width;
-                    const y = height / 2 - (ysRad[i] / phaseScale) * (height / 2);
-
-                    if (i === 0) {
-                        ctx.moveTo(x, y);
-                    } else {
-                        ctx.lineTo(x, y);
+                    const timeMs = xsMs[i];
+                    if (Number.isFinite(timeMs) && timeMs >= windowStart && timeMs <= windowEnd) {
+                        filteredPoints.push({
+                            time: timeMs,
+                            phase: ysRad[i],
+                            index: i
+                        });
                     }
                 }
-                ctx.stroke();
 
-                // Рисуем маркеры битов если есть
-                if (data.markers_ms && data.markers_ms.length > 0) {
-                    ctx.strokeStyle = '#00AA00';
-                    ctx.lineWidth = 1;
-                    ctx.setLineDash([2, 2]);
+                console.log(`DEBUG: Filtered ${filteredPoints.length} points from ${xsMs.length} total points in time range [${windowStart}, ${windowEnd}]ms`);
 
-                    for (const markerMs of data.markers_ms) {
-                        if (markerMs >= xMin && markerMs <= xMax) {
-                            const x = ((markerMs - xMin) / xRange) * width;
-                            ctx.beginPath();
-                            ctx.moveTo(x, 0);
-                            ctx.lineTo(x, height);
-                            ctx.stroke();
+                if (filteredPoints.length > 1) {
+                    // Прореживание до ~1000 точек для производительности
+                    const targetPoints = 1000;
+                    const step = Math.max(1, Math.ceil(filteredPoints.length / targetPoints));
+                    console.log(`DEBUG: Downsampling with step=${step} (target ~${targetPoints} points, actual ~${Math.floor(filteredPoints.length / step)})`);
+
+                    ctx.strokeStyle = '#0066FF';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+
+                    let firstPoint = true;
+                    for (let j = 0; j < filteredPoints.length; j += step) {
+                        const point = filteredPoints[j];
+
+                        // Преобразуем время в пиксели
+                        const normalizedTime = (point.time - windowStart) / windowDuration;
+                        const x = normalizedTime * width;
+                        const y = height / 2 - (point.phase / phaseScale) * (height / 2);
+
+                        if (firstPoint) {
+                            ctx.moveTo(x, y);
+                            firstPoint = false;
+                        } else {
+                            ctx.lineTo(x, y);
                         }
                     }
-                    ctx.setLineDash([]);
-                }
+                    ctx.stroke();
 
-                // Подсветка преамбулы если есть
-                if (data.preamble_ms && data.preamble_ms.length === 2) {
-                    const [t0, t1] = data.preamble_ms;
-                    if (t0 >= xMin && t1 <= xMax) {
-                        const x0 = ((t0 - xMin) / xRange) * width;
-                        const x1 = ((t1 - xMin) / xRange) * width;
+                    // Рисуем маркеры битов если есть
+                    if (data.markers_ms && data.markers_ms.length > 0) {
+                        ctx.strokeStyle = '#00AA00';
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([2, 2]);
 
-                        ctx.fillStyle = 'rgba(255, 255, 0, 0.1)';
-                        ctx.fillRect(x0, 0, x1 - x0, height);
+                        for (const markerMs of data.markers_ms) {
+                            if (markerMs >= windowStart && markerMs <= windowEnd) {
+                                const normalizedTime = (markerMs - windowStart) / windowDuration;
+                                const x = normalizedTime * width;
+                                ctx.beginPath();
+                                ctx.moveTo(x, 0);
+                                ctx.lineTo(x, height);
+                                ctx.stroke();
+                            }
+                        }
+                        ctx.setLineDash([]);
                     }
+                } else {
+                    // Нет точек в окне
+                    ctx.fillStyle = '#6c757d';
+                    ctx.font = '16px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('No data in current time window', width / 2, height / 2);
+                    ctx.textAlign = 'left';
                 }
 
             } else {
@@ -1865,8 +2130,13 @@ HTML_TEMPLATE = '''
         }
 
         function drawInburstFRView(data) {
+            console.log('=== drawInburstFRView called, data keys:', data ? Object.keys(data).slice(0,10) : 'null');
+            console.log('=== fr_xs_ms length:', data?.fr_xs_ms?.length, 'fr_ys_hz length:', data?.fr_ys_hz?.length);
+
             const width = canvas.width;
             const height = canvas.height;
+
+            ctx.clearRect(0, 0, width, height);
 
             // Сетка
             ctx.strokeStyle = '#e9ecef';
@@ -1917,8 +2187,14 @@ HTML_TEMPLATE = '''
 
                 // Находим диапазон частот
                 const ysHz = data.fr_ys_hz;
-                const minFreq = Math.min(...ysHz);
-                const maxFreq = Math.max(...ysHz);
+                // ИСПРАВЛЕНИЕ: использование spread operator с большими массивами вызывает stack overflow
+                // Заменяем на обычный цикл для надёжной работы с любыми объёмами данных
+                let minFreq = ysHz[0];
+                let maxFreq = ysHz[0];
+                for (let i = 1; i < ysHz.length; i++) {
+                    if (ysHz[i] < minFreq) minFreq = ysHz[i];
+                    if (ysHz[i] > maxFreq) maxFreq = ysHz[i];
+                }
                 const freqRange = maxFreq - minFreq || 1000;
                 const centerFreq = (minFreq + maxFreq) / 2;
 
@@ -2242,6 +2518,13 @@ HTML_TEMPLATE = '''
             const bbShiftCheckbox = document.getElementById('bb_shift_enable');
             const bbShiftLabel = bbShiftInput.parentElement.querySelector('label');
 
+            // Получаем элементы file backend
+            const fileBackendRow = document.getElementById('file_backend_row');
+            const fileInfoRow = document.getElementById('file_info_row');
+            const selectedFileName = document.getElementById('selectedFileName');
+            const fileBackendInput = document.getElementById('fileBackendInput');
+            const filePathInput = document.getElementById('filePathInput');
+
             if (isFileBackend) {
                 // Для file backend - отключаем BB shift управление
                 bbShiftInput.disabled = true;
@@ -2268,6 +2551,14 @@ HTML_TEMPLATE = '''
                     disabledLabel.style.fontStyle = 'italic';
                     bbShiftLabel.appendChild(disabledLabel);
                 }
+
+                // Показываем поля выбора файла
+                if (fileBackendRow) {
+                    fileBackendRow.style.display = '';
+                }
+                if (fileInfoRow) {
+                    fileInfoRow.style.display = '';
+                }
             } else {
                 // Для других backend - включаем BB shift управление
                 bbShiftInput.disabled = false;
@@ -2283,6 +2574,23 @@ HTML_TEMPLATE = '''
                 const disabledLabel = document.getElementById('bb_shift_disabled_label');
                 if (disabledLabel) {
                     disabledLabel.remove();
+                }
+
+                // Скрываем поля выбора файла и очищаем значения
+                if (fileBackendRow) {
+                    fileBackendRow.style.display = 'none';
+                }
+                if (fileInfoRow) {
+                    fileInfoRow.style.display = 'none';
+                }
+                if (selectedFileName) {
+                    selectedFileName.textContent = '';
+                }
+                if (fileBackendInput) {
+                    fileBackendInput.value = '';
+                }
+                if (filePathInput) {
+                    filePathInput.value = '';
                 }
             }
         }
@@ -2347,6 +2655,19 @@ HTML_TEMPLATE = '''
                             <option value="rsa306">rsa306</option>
                             <option value="file">file</option>
                         </select>
+                    </div>
+                    <!-- FILE backend file selection -->
+                    <div class="config-row" id="file_backend_row" style="display: none;">
+                        <label>File path:</label>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="text" id="filePathInput" placeholder="C:/work/TesterSDR/captures/your_file.cf32" style="flex: 1;">
+                            <input type="file" id="fileBackendInput" accept=".cf32,.f32,.sigmf-meta" style="display: none;" onchange="handleFileSelection(this)">
+                            <button class="button" onclick="document.getElementById('fileBackendInput').click()" title="Выбрать файл">...</button>
+                        </div>
+                    </div>
+                    <div class="config-row" id="file_info_row" style="display: none;">
+                        <label></label>
+                        <div id="selectedFileName" style="font-size: 12px; color: #6c757d; font-style: italic;"></div>
                     </div>
                     <div class="config-row">
                         <label>Center frequency (Hz):</label>

@@ -305,6 +305,8 @@ python test_get_last_pulse.py       # Тест получения последн
 python test_dsp2plot_simple.py      # Простой тест DSP2Plot клиента
 python test_dsp2plot_file_select.py # Тест выбора файлов в DSP2Plot
 python test_ui_headless.py          # Тест headless режима UI
+python test_phase_slope.py          # Тест удаления линейного тренда фазы
+python test_phase_pubsub.py         # Тест публикации фазовых данных через ZeroMQ
 ```
 
 ### Тестирование с CF32 файлами
@@ -396,6 +398,37 @@ stop_flask.bat  # Освобождает порты 8737-8740
 set PYTHONIOENCODING=utf-8
 chcp 65001
 ```
+
+## Телеметрия и профилирование
+
+Система включает опциональную телеметрию для измерения задержек обработки импульсов. **Телеметрия выключена по умолчанию.**
+
+### Файлы с телеметрией (суффикс _T)
+- `beacon406_PSK_FM_T-plot.py` - standalone с телеметрией
+- `beacon_dsp_service_T.py` - DSP сервис с телеметрией
+- `beacon_dsp2plot_T.py` - UI клиент с телеметрией
+
+### Включение телеметрии
+```bash
+set BEACON_TELEMETRY=1           # Базовый режим (только файл)
+set BEACON_TELEM_LEVEL=verbose   # Verbose режим (файл + консоль)
+python beacon406/beacon406_PSK_FM_T-plot.py
+```
+
+### Логи телеметрии
+- `logs/telemetry.log` - для beacon406_PSK_FM_T-plot.py
+- `logs/telemetry_dsp_service.log` - для beacon_dsp_service_T.py
+- `logs/telemetry_dsp2plot.log` - для beacon_dsp2plot_T.py
+
+### Метки времени (tags)
+- **THRESH_FIRST** - обнаружение импульса
+- **ENQ** - постановка в очередь UI (standalone)
+- **PUB** - публикация через ZeroMQ (DSP сервис)
+- **RECV** - получение события (UI клиент)
+- **UI_TICK** - начало UI обработки
+- **UI_DRAWN** - завершение отрисовки
+
+Подробности в `doc/README_Telemetry.md`
 
 ## Git и коммиты
 
