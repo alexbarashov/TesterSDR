@@ -33,8 +33,8 @@ import os, platform
 SDR_CALIB_OFFSETS_DB = {
     "rtlsdr":   0.0,   # подгоним позже
     "hackrf":   -10.0,
-    "airspy":   20.0,  # Airspy обычно занижает на ~30 dB
-    "sdrplay":  0.0,
+    "airspy":   35.0,  # Airspy обычно занижает на ~30 dB
+    "sdrplay":  20.0,
     "rsa306":   12.0,  # Tektronix RSA306(A/B)
     "file":     0.0,
 }

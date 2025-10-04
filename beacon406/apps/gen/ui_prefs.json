@@ -9,7 +9,7 @@
   "hex_message": "FFFED080020000007FDFFB0020B783E0F66C",
   "FILE_IQ": "C:/work/TesterSDR/captures/UI_iq_1m.cf32",
   "repeat": "100",
-  "gap_s": "4",
+  "gap_s": "8",
   "fs_gen": "1000000",
   "fs_tx": "1000000",
   "hw_amp": false

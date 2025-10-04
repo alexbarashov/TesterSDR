@@ -60,7 +60,7 @@ from logging.handlers import RotatingFileHandler
 import logging as _logging_std
 
 # Константа: телеметрия выключена по умолчанию
-TELEMETRY_ENABLED = False
+TELEMETRY_ENABLED = 1 #False
 
 # Чтение окружения
 _telemetry_on = TELEMETRY_ENABLED or os.getenv("BEACON_TELEMETRY") == "1"
