@@ -30,7 +30,8 @@
       "Read(//c/**)",
       "Bash(git -C C:workTesterSDR status beacon406/beacon406_PSK_FM-plot.py)",
       "Bash(git rm:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []
