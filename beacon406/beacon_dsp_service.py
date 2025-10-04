@@ -521,9 +521,7 @@ class BeaconDSPService:
 
         self.backend = None
         self.sample_rate = float(SAMPLE_RATE_SPS)
-        # NCO удалён - не используется
-        # self.nco_phase = 0.0
-        # self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+        # NCO удалён - BB-shift применяется внутри backends (Zero-IF контракт)
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
 
         # Эффективные значения BB shift (могут отличаться от констант для file-режима)
@@ -869,7 +867,8 @@ class BeaconDSPService:
         base_idx = self.sample_counter
         x = samples.copy()
 
-        # NCO удалён - backend применяет mix_shift внутри read()
+        # NCO удалён - backends применяет BB-shift внутри read() (Zero-IF контракт)
+        # На выходе backends всегда Zero-IF (несущая = 0 Hz)
 
         with self._lock:
             self._append_samples(x)

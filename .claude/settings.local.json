@@ -24,7 +24,13 @@
       "Bash(timeout 30 python test_file_selection_en.py)",
       "Bash(git add:*)",
       "Bash(timeout:*)",
-      "Bash(C:UsersalexbAppDataLocalProgramsPythonPython39python.exe test_pulse_events.py)"
+      "Bash(C:UsersalexbAppDataLocalProgramsPythonPython39python.exe test_pulse_events.py)",
+      "Bash(git log:*)",
+      "Bash(git revert:*)",
+      "Read(//c/**)",
+      "Bash(git -C C:workTesterSDR status beacon406/beacon406_PSK_FM-plot.py)",
+      "Bash(git rm:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

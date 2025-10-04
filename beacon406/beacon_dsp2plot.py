@@ -615,21 +615,8 @@ class Dsp2PlotUI:
                         self.ax_pulse.set_ylim(ymin - 2, ymax + 2)
                     need_draw = True
 
-            # Фаза график - обрезаем по core_gate (только импульс)
+            # Фаза график - НЕ обрезаем, DSP уже обрезал с START_DELAY_MS и PHASE_TRIM_END_MS
             if px.size > 1 and py.size == px.size:
-                # Применяем обрезку по core_gate если доступен
-                if core_gate and len(core_gate) == 2:
-                    g0, g1 = core_gate
-                    # Переводим границы импульса из сэмплов в миллисекунды
-                    t0_ms = (g0 / fs) * 1000.0
-                    t1_ms = (g1 / fs) * 1000.0
-                    # Обрезаем данные фазы по времени импульса
-                    mask = (px >= t0_ms) & (px <= t1_ms)
-                    px = px[mask] - t0_ms
-                    py = py[mask]
-                    self.ln_phase.set_data(px, py)
-                    self.ax_phase.set_xlim(px.min(), px.max())
-
                 self._phase_x = px
                 self._phase_y = py
                 self.ln_phase.set_data(px, py)
@@ -644,21 +631,8 @@ class Dsp2PlotUI:
                         self.ax_phase.set_ylim(ymin - margin, ymax + margin)
                     need_draw = True
 
-            # FM график - обрезаем по core_gate (только импульс)
+            # FM график - НЕ обрезаем, DSP уже обрезал с START_DELAY_MS
             if fx.size > 1 and fy.size == fx.size:
-                # Применяем обрезку по core_gate если доступен
-                if core_gate and len(core_gate) == 2:
-                    g0, g1 = core_gate
-                    # Переводим границы импульса из сэмплов в миллисекунды
-                    t0_ms = (g0 / fs) * 1000.0
-                    t1_ms = (g1 / fs) * 1000.0
-                    # Обрезаем данные FM по времени импульса
-                    mask = (fx >= t0_ms) & (fx <= t1_ms)
-                    fx = fx[mask] - t0_ms
-                    fy = fy[mask]
-                    self.ln_fm.set_data(fx, fy)
-                    self.ax_fm.set_xlim(fx.min(), fx.max())
-
                 self._fm_x = fx
                 self._fm_y = fy
                 self.ln_fm.set_data(fx, fy)

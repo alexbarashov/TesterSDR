@@ -113,9 +113,6 @@ class SoapySlidingRMS:
         # Params table snapshot
         self.last_phase_metrics = None
         self.last_msg_hex = None
- 
-        extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
-
 
         # --- перед блоком создания backend:
         self.backend = None
@@ -135,7 +132,6 @@ class SoapySlidingRMS:
             return (path is None) or (str(path).strip() == "")
 
         file_wait = _is_file_wait_mode()
-        extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if not file_wait else {}
 
         if file_wait:
             log.info("File-wait mode: SDR not needed. Press 'Open' and select .cf32")
@@ -219,8 +215,7 @@ class SoapySlidingRMS:
         
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
         self.tail_p = np.empty(0, dtype=np.float32)
-        self.nco_phase = 0.0
-        self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+        # NCO удалён - BB-shift применяется в backends (Zero-IF контракт)
         max_points = int(LEVEL_HISTORY_SEC * self.sample_rate / max(VIS_DECIM, 1))
         
         
@@ -760,7 +755,8 @@ class SoapySlidingRMS:
 
         # Создаём новый backend
         try:
-            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (backend_name == "file") else {}
+            # Передаём if_offset_hz только для Soapy бэкендов (НЕ для file - Zero-IF контракт)
+            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (backend_name != "file") else {}
 
             self.backend = safe_make_backend(
                 backend_name,
@@ -789,7 +785,7 @@ class SoapySlidingRMS:
 
             # Обновляем параметры окна RMS
             self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+            # NCO удалён - BB-shift применяется в backends
 
             # Сбрасываем состояние
             self._stop = False
@@ -803,7 +799,7 @@ class SoapySlidingRMS:
             self.last_core_gate = None
             self.in_pulse = False
             self.pulse_start_abs = None
-            self.nco_phase = 0.0
+            # NCO удалён
             self.last_impulse_freq_hz = 0.0
 
             # Очищаем историю
@@ -850,7 +846,8 @@ class SoapySlidingRMS:
     def _restore_original_backend(self):
         """Восстанавливает исходный backend при ошибке."""
         try:
-            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
+            # Передаём if_offset_hz только для Soapy бэкендов (НЕ для file - Zero-IF контракт)
+            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME != "file") else {}
             self.backend = safe_make_backend(
                 BACKEND_NAME,
                 sample_rate=SAMPLE_RATE_SPS,
@@ -937,7 +934,7 @@ class SoapySlidingRMS:
 
             # Обновляем параметры окна RMS после смены sample_rate
             self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+            # NCO удалён - BB-shift применяется в backends
 
             # Сбрасываем состояние
             self._stop = False
@@ -951,7 +948,7 @@ class SoapySlidingRMS:
             self.last_core_gate = None
             self.in_pulse = False
             self.pulse_start_abs = None
-            self.nco_phase = 0.0
+            # NCO удалён
             self.last_impulse_freq_hz = 0.0
 
             # Очищаем историю
@@ -981,7 +978,8 @@ class SoapySlidingRMS:
             log.error(f"File loading error: {e}")
             # Попытаемся вернуться к исходному backend
             try:
-                extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
+                # Передаём if_offset_hz только для Soapy бэкендов (НЕ для file - Zero-IF контракт)
+                extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME != "file") else {}
                 self.backend = safe_make_backend(
                     BACKEND_NAME,
                     sample_rate=SAMPLE_RATE_SPS,
@@ -1287,12 +1285,8 @@ class SoapySlidingRMS:
         base_idx = self.sample_counter
         x = samples.copy()
 
-        # Optional baseband shift
-        if BB_SHIFT_ENABLE and abs(BB_SHIFT_HZ) > 0:
-            n = np.arange(samples.size, dtype=np.float64)
-            mixer = np.exp(1j * (self.nco_phase + self.nco_k * n)).astype(np.complex64)
-            x *= mixer
-            self.nco_phase = float((self.nco_phase + self.nco_k * samples.size) % (2.0 * np.pi))
+        # NCO удалён - BB-shift применяется внутри backends (Zero-IF контракт)
+        # Backends обязан выдавать Zero-IF на выходе (несущая на 0 Hz)
 
         with self.data_lock:
             self._append_samples(x)

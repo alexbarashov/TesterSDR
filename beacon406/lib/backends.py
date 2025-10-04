@@ -131,6 +131,9 @@ class SoapyBackend(SDRBackend):
     """
 
     def __init__(self, device_args: Dict[str, Any], **kw):
+        # Читаем if_offset_hz для BB-shift (Zero-IF контракт)
+        self._if_offset_hz = float(kw.pop("if_offset_hz", 0.0))
+
         super().__init__(**kw)
         try:
             # lazy import: optional dependency (SoapySDR подключаем только при создании Soapy-бэкенда)
@@ -185,6 +188,21 @@ class SoapyBackend(SDRBackend):
 
         # Калибровка dB под драйвер
         self.calib_offset_db = SDR_CALIB_OFFSETS_DB.get(drv_key, 0.0)
+
+        # Инициализация NCO для BB-shift (Zero-IF контракт)
+        # Используем ту же логику, что старый NCO в beacon406_PSK_FM-plot.py:
+        # BB_SHIFT_HZ = IF_OFFSET_HZ, mixer = exp(+1j × 2π × BB_SHIFT_HZ / Fs × n)
+        # ВАЖНО: _mix_w вычисляется для actual_sample_rate_sps (ПОСЛЕ децимации)
+        self._mix_phase = 0.0
+        self._mix_shift_hz = self._if_offset_hz  # БЕЗ инверсии знака!
+        self._mix_w = 2.0 * np.pi * self._mix_shift_hz / self.actual_sample_rate_sps if self._mix_shift_hz != 0 else 0.0
+
+        # Логируем настройку BB-shift
+        if self._if_offset_hz != 0:
+            log.info("%s: if_offset_hz=%.0f Hz → BB-shift=%.0f Hz (Zero-IF контракт)",
+                     drv_key, self._if_offset_hz, self._mix_shift_hz)
+        else:
+            log.debug("%s: if_offset_hz=0, BB-shift выключен (Zero-IF режим)", drv_key)
 
         # Частота
         self.dev.setFrequency(self._SOAPY_SDR_RX, 0, self.center_freq_hz)
@@ -326,6 +344,16 @@ class SoapyBackend(SDRBackend):
                 x = x.mean(axis=1).astype(np.complex64)
             else:
                 x = x[::self.decim]  # fallback на простой downsample
+
+        # === BB-shift для Zero-IF (применяется ПОСЛЕ децимации) ===
+        # _mix_shift_hz = if_offset_hz, применяем exp(+1j×ph) как старый NCO
+        if self._mix_w != 0 and len(x) > 0:
+            n = np.arange(len(x), dtype=np.float64)
+            ph = self._mix_phase + self._mix_w * n
+            mixer = np.exp(1j * ph).astype(np.complex64)
+            x = x * mixer
+            self._mix_phase = float((self._mix_phase + self._mix_w * len(x)) % (2.0 * np.pi))
+
         return x
 
     def get_status(self) -> Dict[str, Any]:
@@ -336,6 +364,7 @@ class SoapyBackend(SDRBackend):
             "device_info": getattr(self, "device_info", None),
             "hw_sample_rate_sps": float(getattr(self, "sample_rate_hw", getattr(self, "sample_rate_sps", 0.0))),
             "decim": int(getattr(self, "decim", 1)),
+            "if_offset_hz": float(getattr(self, "_if_offset_hz", 0.0)),  # BB-shift = -if_offset_hz (Zero-IF)
         })
         # Фактическая центральная частота
         try:
@@ -687,6 +716,7 @@ def make_backend(name: str,
             gain_db=gain_db,
             agc=agc,
             corr_ppm=corr_ppm,
+            **extras  # Передаём if_offset_hz и другие параметры
         )
 
     if name == "file":

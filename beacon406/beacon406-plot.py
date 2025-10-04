@@ -48,8 +48,6 @@ FREQ_CORR_PPM       = 0
 #BACKEND_NAME = "soapy_rtl"   # "soapy_hackrf" | "soapy_airspy" | "soapy_sdrplay" | "file"
 #BACKEND_ARGS = None            # e.g., {"driver":"rtlsdr"} or for file: {"path": r"C:/path/to/trace.cf32"}
 
-BB_SHIFT_ENABLE     = True            # Если true, хранит уже смещённый БП
-BB_SHIFT_HZ         = (IF_OFFSET_HZ)
 RMS_WIN_MS          = 1.0
 VIS_DECIM           = 2048
 LEVEL_HISTORY_SEC   = 12
@@ -92,8 +90,6 @@ class SoapySlidingRMS:
         self.last_msg_hex = None
 
 
-        extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
-
         # --- SAFE: пробуем создать backend; при отсутствии SDR — тихо уходим в режим ожидания файла
         self.backend = safe_make_backend(
             BACKEND_NAME,
@@ -103,8 +99,8 @@ class SoapySlidingRMS:
             agc=bool(ENABLE_AGC),
             corr_ppm=int(FREQ_CORR_PPM),
             device_args=BACKEND_ARGS,
+            if_offset_hz=IF_OFFSET_HZ,  # BB-shift для Zero-IF (применяется в backends)
             on_fail="file_wait",
-            **extra_kwargs,  # if_offset для file
         )
 
         # Реальный Fs (если backend есть); иначе — временно берём константу
@@ -129,8 +125,7 @@ class SoapySlidingRMS:
         
         self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
         self.tail_p = np.empty(0, dtype=np.float32)
-        self.nco_phase = 0.0
-        self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
+        # NCO удалён - BB-shift применяется внутри backends (Zero-IF контракт)
         max_points = int(LEVEL_HISTORY_SEC * self.sample_rate / max(VIS_DECIM, 1))
         
         
@@ -654,9 +649,6 @@ class SoapySlidingRMS:
 
         # Создаём новый backend
         try:
-
-            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (backend_name == "file") else {}
-
             self.backend = safe_make_backend(
                 backend_name,
                 sample_rate=SAMPLE_RATE_SPS,
@@ -665,8 +657,8 @@ class SoapySlidingRMS:
                 agc=bool(ENABLE_AGC),
                 corr_ppm=int(FREQ_CORR_PPM),
                 device_args=device_args,
+                if_offset_hz=IF_OFFSET_HZ,  # BB-shift для Zero-IF
                 on_fail="file_wait",
-                **extra_kwargs,
             )
 
             # Обновляем Fs/статус если backend есть
@@ -714,7 +706,6 @@ class SoapySlidingRMS:
 
             # Обновляем параметры окна RMS
             self.win_samps = max(1, int(round(self.sample_rate * (RMS_WIN_MS * 1e-3))))
-            self.nco_k = 2.0 * np.pi * (BB_SHIFT_HZ / float(self.sample_rate))
 
             # Сбрасываем состояние
             self._stop = False
@@ -728,7 +719,6 @@ class SoapySlidingRMS:
             self.last_core_gate = None
             self.in_pulse = False
             self.pulse_start_abs = None
-            self.nco_phase = 0.0
             self.last_impulse_freq_hz = 0.0
 
             # Очищаем историю
@@ -776,7 +766,6 @@ class SoapySlidingRMS:
         """Восстанавливает исходный backend при ошибке."""
         try:
 
-            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
             self.backend = safe_make_backend(
                 BACKEND_NAME,
                 sample_rate=SAMPLE_RATE_SPS,
@@ -785,8 +774,8 @@ class SoapySlidingRMS:
                 agc=bool(ENABLE_AGC),
                 corr_ppm=int(FREQ_CORR_PPM),
                 device_args=BACKEND_ARGS,
+                if_offset_hz=IF_OFFSET_HZ,  # BB-shift для Zero-IF
                 on_fail="file_wait",
-                **extra_kwargs,
             )
             # если backend None — просто не запускаем поток
             if self.backend is not None:
@@ -847,8 +836,6 @@ class SoapySlidingRMS:
         # Пересоздаём backend с новым файлом
         try:
 
-            extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ}
-
             self.backend = safe_make_backend(
                 "file",
                 sample_rate=SAMPLE_RATE_SPS,
@@ -857,7 +844,7 @@ class SoapySlidingRMS:
                 agc=bool(ENABLE_AGC),
                 corr_ppm=int(FREQ_CORR_PPM),
                 device_args={"path": file_path},
-                **extra_kwargs,
+                if_offset_hz=IF_OFFSET_HZ,  # BB-shift для Zero-IF
             )
 
             # Обновляем параметры
@@ -890,7 +877,6 @@ class SoapySlidingRMS:
             self.last_core_gate = None
             self.in_pulse = False
             self.pulse_start_abs = None
-            self.nco_phase = 0.0
             self.last_impulse_freq_hz = 0.0
 
             # Очищаем историю
@@ -920,7 +906,6 @@ class SoapySlidingRMS:
             log.info(f"[ERROR] Ошибка загрузки файла: {e}")
             # Попытаемся вернуться к исходному backend
             try:
-                extra_kwargs = {"if_offset_hz": IF_OFFSET_HZ} if (BACKEND_NAME == "file") else {}
                 self.backend = safe_make_backend(
                     BACKEND_NAME,
                     sample_rate=SAMPLE_RATE_SPS,
@@ -929,7 +914,7 @@ class SoapySlidingRMS:
                     agc=bool(ENABLE_AGC),
                     corr_ppm=int(FREQ_CORR_PPM),
                     device_args=BACKEND_ARGS,
-                    **extra_kwargs,
+                    if_offset_hz=IF_OFFSET_HZ,  # BB-shift для Zero-IF
                 )
                 _st = self.backend.get_status() or {}
                 self.sample_rate = float(
@@ -1226,12 +1211,8 @@ class SoapySlidingRMS:
         base_idx = self.sample_counter
         x = samples.copy()
 
-        # Optional baseband shift
-        if BB_SHIFT_ENABLE and abs(BB_SHIFT_HZ) > 0:
-            n = np.arange(samples.size, dtype=np.float64)
-            mixer = np.exp(1j * (self.nco_phase + self.nco_k * n)).astype(np.complex64)
-            x *= mixer
-            self.nco_phase = float((self.nco_phase + self.nco_k * samples.size) % (2.0 * np.pi))
+        # NCO удалён - BB-shift применяется внутри backends (Zero-IF контракт)
+        # Backends обязан выдавать Zero-IF на выходе (несущая на 0 Hz)
 
         with self.data_lock:
             self._append_samples(x)
