@@ -131,6 +131,9 @@ class SoapyBackend(SDRBackend):
     """
 
     def __init__(self, device_args: Dict[str, Any], **kw):
+        # Zero-IF контракт: извлекаем if_offset_hz для BB-shift
+        self._if_offset_hz = float(kw.pop("if_offset_hz", 0.0))
+
         super().__init__(**kw)
         try:
             # lazy import: optional dependency (SoapySDR подключаем только при создании Soapy-бэкенда)
@@ -185,6 +188,16 @@ class SoapyBackend(SDRBackend):
 
         # Калибровка dB под драйвер
         self.calib_offset_db = SDR_CALIB_OFFSETS_DB.get(drv_key, 0.0)
+
+        # Zero-IF контракт: BB-shift = -if_offset_hz для компенсации
+        self._mix_shift_hz = -self._if_offset_hz if self._if_offset_hz else 0.0
+        self._mix_phase = 0.0
+        self._mix_w = (2.0*np.pi*self._mix_shift_hz / float(self.actual_sample_rate_sps)
+                       if self._mix_shift_hz else 0.0)
+
+        if self._mix_shift_hz != 0:
+            log.info("%s: Zero-IF contract: if_offset=%.0f Hz, BB-shift=%.0f Hz",
+                     drv_key, self._if_offset_hz, self._mix_shift_hz)
 
         # Частота
         self.dev.setFrequency(self._SOAPY_SDR_RX, 0, self.center_freq_hz)
@@ -326,6 +339,14 @@ class SoapyBackend(SDRBackend):
                 x = x.mean(axis=1).astype(np.complex64)
             else:
                 x = x[::self.decim]  # fallback на простой downsample
+
+        # === Zero-IF контракт: применяем BB-shift для компенсации if_offset_hz ===
+        if self._mix_shift_hz != 0 and len(x) > 0:
+            n = np.arange(len(x), dtype=np.float64)
+            mixer = np.exp(1j * (self._mix_phase + self._mix_w * n)).astype(np.complex64)
+            x = x * mixer
+            self._mix_phase = float((self._mix_phase + self._mix_w * len(x)) % (2.0 * np.pi))
+
         return x
 
     def get_status(self) -> Dict[str, Any]:
@@ -336,6 +357,8 @@ class SoapyBackend(SDRBackend):
             "device_info": getattr(self, "device_info", None),
             "hw_sample_rate_sps": float(getattr(self, "sample_rate_hw", getattr(self, "sample_rate_sps", 0.0))),
             "decim": int(getattr(self, "decim", 1)),
+            "if_offset_hz": float(getattr(self, "_if_offset_hz", 0.0)),
+            "mix_shift_hz": float(getattr(self, "_mix_shift_hz", 0.0)),
         })
         # Фактическая центральная частота
         try:

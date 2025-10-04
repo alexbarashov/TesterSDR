@@ -620,19 +620,19 @@ class BeaconDSPService:
 
         try:
             # Используем safe_make_backend с file_wait fallback
-            # ВАЖНО: для file backend НЕ передаём if_offset_hz (двойной shift)
-            backend_kwargs = {
-                "sample_rate": SAMPLE_RATE_SPS,
-                "center_freq": float(CENTER_FREQ_HZ),
-                "gain_db": float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
-                "agc": bool(ENABLE_AGC),
-                "corr_ppm": int(FREQ_CORR_PPM),
-                "device_args": args,
-                "on_fail": "file_wait"
-            }
-            if name != "file":
-                backend_kwargs["if_offset_hz"] = IF_OFFSET_HZ
-            self.backend = safe_make_backend(name, **backend_kwargs)
+            # ВАЖНО: if_offset_hz передаётся ВСЕГДА (контракт Zero-IF)
+            # FilePlaybackBackend сам решает, применять ли его
+            self.backend = safe_make_backend(
+                name,
+                sample_rate=SAMPLE_RATE_SPS,
+                center_freq=float(CENTER_FREQ_HZ),
+                gain_db=float(TUNER_GAIN_DB) if USE_MANUAL_GAIN else None,
+                agc=bool(ENABLE_AGC),
+                corr_ppm=int(FREQ_CORR_PPM),
+                device_args=args,
+                if_offset_hz=IF_OFFSET_HZ,  # ВСЕГДА передаём (Zero-IF контракт)
+                on_fail="file_wait"
+            )
             if self.backend is None:
                 # Backend в режиме ожидания файла
                 log.warning("Backend in file_wait mode - waiting for CF32 file")
@@ -661,11 +661,11 @@ class BeaconDSPService:
             # Fallback на file_wait режим
             log.warning("Fallback to file_wait mode - no backend available")
             try:
-                # ВАЖНО: для file backend НЕ передаём if_offset_hz
                 self.backend = safe_make_backend(
                     "file",
                     sample_rate=SAMPLE_RATE_SPS,
                     center_freq=CENTER_FREQ_HZ,
+                    if_offset_hz=IF_OFFSET_HZ,  # Передаём всегда (Zero-IF контракт)
                     on_fail="file_wait"
                 )
             except Exception:
@@ -1579,19 +1579,18 @@ class BeaconDSPService:
                                 else:
                                     actual_backend = new_backend_name
 
-                                # ВАЖНО: для file backend НЕ передаём if_offset_hz
-                                backend_kwargs = {
-                                    "sample_rate": config.get("sample_rate_sps", SAMPLE_RATE_SPS),
-                                    "center_freq": config.get("center_freq_hz", CENTER_FREQ_HZ),
-                                    "gain_db": config.get("gain_db", TUNER_GAIN_DB),
-                                    "agc": ENABLE_AGC,
-                                    "corr_ppm": FREQ_CORR_PPM,
-                                    "device_args": new_backend_args,
-                                    "on_fail": "file_wait"
-                                }
-                                if actual_backend != "file":
-                                    backend_kwargs["if_offset_hz"] = IF_OFFSET_HZ
-                                self.backend = safe_make_backend(actual_backend, **backend_kwargs)
+                                # ВАЖНО: if_offset_hz передаём ВСЕГДА (Zero-IF контракт)
+                                self.backend = safe_make_backend(
+                                    actual_backend,
+                                    sample_rate=config.get("sample_rate_sps", SAMPLE_RATE_SPS),
+                                    center_freq=config.get("center_freq_hz", CENTER_FREQ_HZ),
+                                    gain_db=config.get("gain_db", TUNER_GAIN_DB),
+                                    agc=ENABLE_AGC,
+                                    corr_ppm=FREQ_CORR_PPM,
+                                    device_args=new_backend_args,
+                                    if_offset_hz=IF_OFFSET_HZ,  # ВСЕГДА (Zero-IF контракт)
+                                    on_fail="file_wait"
+                                )
 
                                 # Обновить параметры сервиса от backend
                                 with self._lock:
